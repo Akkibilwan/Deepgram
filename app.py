@@ -72,7 +72,6 @@ SUPPORTED_LANGUAGES = {
 
 # --- Helper Functions ---
 
-# <<< MODIFIED Function >>>
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
     Downloads the best audio from URL using yt-dlp to a temporary file
@@ -84,26 +83,22 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     video_title = "audio_transcript"
 
     try:
-        # --- Use .webm suffix ---
         with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
             temp_audio_path = temp_audio.name
     except Exception as e:
         st.error(f"Failed to create temporary file: {e}", icon="❌")
         return None, None
 
-    # yt-dlp options - Added 'overwrites': True
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': temp_audio_path,
-        # No 'postprocessors' key
         'noplaylist': True,
         'quiet': False,
         'no_warnings': False,
         'verbose': True,
         'socket_timeout': 45,
         'retries': 2,
-        # --- ADDED OVERWRITES ---
-        'overwrites': True, # <<< Ensure file is downloaded even if temp name exists
+        'overwrites': True, # Ensure file is downloaded even if temp name exists
         # 'ffmpeg_location': '/path/to/your/ffmpeg',
     }
 
@@ -112,7 +107,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     progress_placeholder.info("Download in progress... See console/app logs for details.")
 
     def progress_hook(d):
-        # (Progress hook code remains the same)
         hook_status = d.get('status')
         filename = d.get('filename', '')
         info_dict = d.get('info_dict')
@@ -130,7 +124,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
                  video_title = info_dict.get('title', video_title)
     ydl_opts['progress_hooks'] = [progress_hook]
 
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
@@ -139,11 +132,9 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
                 video_title = info_dict.get('title', video_title)
                 actual_filepath = temp_audio_path # Assume outtmpl was respected
 
-                # --- Crucial Check: File exists AND has size > 0 ---
                 if not os.path.exists(actual_filepath) or os.path.getsize(actual_filepath) == 0:
                     st.error(f"Download process finished, but the output file '{os.path.basename(actual_filepath)}' is missing or empty (0 bytes). Check logs.", icon="❌")
                     progress_placeholder.empty()
-                    # Cleanup attempt
                     if os.path.exists(actual_filepath): os.remove(actual_filepath)
                     return None, None
 
@@ -169,8 +160,7 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
              except OSError: pass
         return None, None
 
-
-# <<< Other helper functions remain unchanged >>>
+# <<< MODIFIED Function >>>
 async def transcribe_audio_data(audio_data: bytes, language_code: str, filename_hint: str = "audio") -> str:
     """Transcribes audio data (bytes) using Deepgram asynchronously."""
     try:
@@ -180,8 +170,12 @@ async def transcribe_audio_data(audio_data: bytes, language_code: str, filename_
             smart_format=True,
             language=language_code,
         )
-        st.info(f"Sending '{filename_hint}' (approx {len(audio_data)/1024:.1f} KB) to Deepgram ({language_code})...", icon="📤") # Added size info
-        response = await deepgram.listen.prerecorded.v("1").transcribe_file(payload, options)
+        st.info(f"Sending '{filename_hint}' (approx {len(audio_data)/1024:.1f} KB) to Deepgram ({language_code})...", icon="📤")
+
+        # --- USE listen.rest instead of listen.prerecorded ---
+        response = await deepgram.listen.rest.v("1").transcribe_file(payload, options)
+        # --- End of change ---
+
         transcript = ""
         if response and response.results and response.results.channels:
             first_channel = response.results.channels[0]
@@ -194,15 +188,20 @@ async def transcribe_audio_data(audio_data: bytes, language_code: str, filename_
              return transcript
         else:
              st.warning("Transcription completed, but no transcript text found in the response.", icon="⚠️")
+             # You might want to log the full response here if transcripts are often empty
+             # print(response.to_json(indent=2)) # For local debugging
+             # st.json(response.to_json(indent=2)) # To display in Streamlit app (use cautiously)
              return "[Transcription empty or failed]"
     except Exception as e:
         st.error(f"Deepgram transcription failed: {e}", icon="❌")
+        # Display exception details in Streamlit app for better debugging
+        st.exception(e)
         return ""
 
 def create_word_document(text: str) -> io.BytesIO | None:
     """Creates a Word document (.docx) in memory containing the text."""
-    if not text:
-        st.warning("Cannot create Word document from empty transcript.", icon="📄")
+    if not text or text == "[Transcription empty or failed]": # Avoid creating empty docs
+        st.warning("Cannot create Word document from empty or failed transcript.", icon="📄")
         return None
     try:
         document = Document()
@@ -284,7 +283,6 @@ if st.session_state.processing:
         transcript_text = ""
         with st.spinner(f"Step 1/2: Downloading audio for '{url_to_process[:50]}...'"):
             try:
-                # --- Call the MODIFIED download function ---
                 audio_filepath, video_title = download_audio_yt_dlp(url_to_process)
                 st.session_state.video_title = video_title if video_title else "downloaded_audio"
             except Exception as e:
@@ -316,16 +314,14 @@ if st.session_state.processing:
                         except Exception as e:
                             st.warning(f"Could not remove temporary file {audio_filepath}: {e}", icon="⚠️")
         else:
-            # Check if download function displayed an error, if not add one
-            if audio_filepath is None : # Check if download function itself indicated failure
+            if audio_filepath is None :
                  st.warning("Transcription step skipped because audio download failed or was interrupted.", icon="⚠️")
-            else: # File path exists but file doesn't, likely removed by download function on error
+            else:
                  st.warning("Transcription step skipped because audio download failed (file missing/empty post-download). Check logs.", icon="⚠️")
             st.session_state.transcript = ""
 
         st.session_state.processing = False
         st.rerun()
-
 
 if st.session_state.transcript:
     st.subheader(f"📄 Transcription Result for '{st.session_state.video_title}'")
@@ -342,10 +338,11 @@ if st.session_state.transcript:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key="download_word_button", help="Click to download the transcript as a Microsoft Word file."
         )
-    else: st.error("Could not generate the Word document for download.", icon="📄")
+    else:
+        # Error message handled within create_word_document if it fails
+        pass
 
 
-# --- Footer ---
 st.markdown("---")
 current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.caption(f"Powered by Deepgram, yt-dlp, and Streamlit. | App loaded: {current_time_str}")
