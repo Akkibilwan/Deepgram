@@ -1,0 +1,5 @@
+streamlit
+deepgram-sdk>=3.0 # Ensure you have version 3 or later for async support
+pytube
+python-docx
+aiohttp # Often needed by async libraries like deepgram-sdk
