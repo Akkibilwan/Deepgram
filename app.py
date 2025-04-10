@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import asyncio
-import tempfile
 import io
 from deepgram import (
     DeepgramClient,
@@ -9,9 +8,9 @@ from deepgram import (
     PrerecordedOptions,
     FileSource,
 )
-from pytube import YouTube
 from docx import Document
 from docx.shared import Inches
+import re # For basic filename sanitization
 
 # --- Configuration ---
 
@@ -28,17 +27,13 @@ except Exception as e:
     st.error(f"An unexpected error occurred reading secrets: {e}")
     st.stop()
 
-
 # Deepgram client configuration
 config: DeepgramClientOptions = DeepgramClientOptions(
-    verbose=False, # Set to True for more detailed logs if needed
-    # You can add other config options here if necessary
+    verbose=False,
 )
 deepgram: DeepgramClient = DeepgramClient(DEEPGRAM_API_KEY, config)
 
-# Supported Languages for Transcription (Add more as needed based on Deepgram support)
-# Format: {Display Name: Deepgram Language Code}
-# See Deepgram docs for full list: https://developers.deepgram.com/docs/languages
+# Supported Languages for Transcription
 SUPPORTED_LANGUAGES = {
     "English": "en",
     "Spanish": "es",
@@ -55,26 +50,26 @@ SUPPORTED_LANGUAGES = {
 
 # --- Helper Functions ---
 
-async def transcribe_audio(audio_filepath: str, language_code: str) -> str:
-    """Transcribes audio file using Deepgram asynchronously."""
+async def transcribe_uploaded_audio(audio_data: bytes, language_code: str, mimetype: str | None = None) -> str:
+    """Transcribes audio data (bytes) using Deepgram asynchronously."""
     try:
-        with open(audio_filepath, "rb") as audio_file:
-            buffer_data = audio_file.read()
-
         payload: FileSource = {
-            "buffer": buffer_data,
+            "buffer": audio_data,
         }
+        # Optionally include mimetype if available and reliable
+        # if mimetype:
+        #     payload["mimetype"] = mimetype
 
         options: PrerecordedOptions = PrerecordedOptions(
-            model="nova-2", # Or choose another model like "base"
+            model="nova-2",
             smart_format=True,
             language=language_code,
-            # Add other options like diarize=True if needed
         )
 
         st.info(f"Sending audio to Deepgram for transcription in {language_code}...")
 
         # Make the async API call
+        # Note: Using transcribe_file method even for buffer source in v3 SDK
         response = await deepgram.listen.prerecorded.v("1").transcribe_file(payload, options)
 
         # Extract transcript
@@ -84,51 +79,50 @@ async def transcribe_audio(audio_filepath: str, language_code: str) -> str:
 
     except Exception as e:
         st.error(f"Deepgram transcription failed: {e}")
+        # Consider logging the full error for debugging
+        # print(f"Deepgram Error: {e}")
         return "" # Return empty string on failure
 
-def download_youtube_audio(url: str) -> str | None:
-    """Downloads the best audio-only stream from a YouTube URL to a temporary file."""
-    try:
-        yt = YouTube(url)
-        # Filter for audio-only streams and get the best quality (highest abr)
-        audio_stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
-
-        if not audio_stream:
-            st.error("Could not find an audio-only stream for this video.")
-            return None
-
-        st.info(f"Downloading audio for '{yt.title}'...")
-        # Create a temporary file to store the audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_audio: # Use .mp4 or .webm common formats
-            audio_stream.download(output_path=os.path.dirname(temp_audio.name), filename=os.path.basename(temp_audio.name))
-            st.success("Audio downloaded successfully.")
-            return temp_audio.name # Return the path to the temporary file
-
-    except Exception as e:
-        st.error(f"Error downloading YouTube audio: {e}")
-        return None
 
 def create_word_document(text: str) -> io.BytesIO:
     """Creates a Word document (.docx) in memory containing the text."""
     document = Document()
     document.add_paragraph(text)
-    # You can add more formatting here if needed
-    # e.g., document.add_heading('Transcript', level=1)
-
-    # Save document to a byte stream
     buffer = io.BytesIO()
     document.save(buffer)
-    buffer.seek(0) # Rewind buffer to the beginning
+    buffer.seek(0)
     return buffer
+
+def sanitize_filename(filename: str) -> str:
+    """Removes potentially problematic characters for filenames."""
+    # Remove file extension first
+    base_name = os.path.splitext(filename)[0]
+    # Replace spaces and invalid chars with underscore
+    sanitized = re.sub(r'[\\/*?:"<>|\s]+', '_', base_name)
+    # Limit length if necessary
+    return sanitized[:100] # Limit length to avoid issues
 
 # --- Streamlit App UI ---
 
-st.set_page_config(page_title="YouTube Transcriber", layout="wide")
-st.title("🎙️ YouTube Video Transcriber using Deepgram")
-st.markdown("Enter a YouTube URL, choose the language, and get the transcript.")
+st.set_page_config(page_title="Audio File Transcriber", layout="wide")
+st.title("🎙️ Audio File Transcriber using Deepgram")
+st.markdown("""
+**Instructions:**
+1.  Download the audio from your source (e.g., YouTube) using a tool like `yt-dlp`*, an online downloader, or `ffmpeg`.
+2.  Save the audio as an MP3, MP4 (audio track), M4A, WAV, or other format Deepgram supports.
+3.  Upload the downloaded audio file below.
+4.  Choose the language spoken in the audio.
+5.  Click 'Transcribe Audio File'.
+
+*Example using `yt-dlp` (command-line tool): `yt-dlp -x --audio-format mp3 YOUR_YOUTUBE_URL`*
+""")
 
 # --- Input Fields ---
-youtube_url = st.text_input("Enter YouTube URL:", placeholder="https://www.youtube.com/watch?v=...")
+uploaded_file = st.file_uploader(
+    "Upload Audio File:",
+    type=['mp3', 'wav', 'm4a', 'mp4', 'aac', 'ogg', 'flac', 'amr'], # Common audio types Deepgram might support
+    accept_multiple_files=False
+)
 
 # Language selection
 selected_language_name = st.selectbox(
@@ -141,44 +135,29 @@ selected_language_code = SUPPORTED_LANGUAGES[selected_language_name]
 # --- Transcription Button and Logic ---
 if 'transcript' not in st.session_state:
     st.session_state.transcript = ""
-if 'video_title' not in st.session_state:
-    st.session_state.video_title = "transcript" # Default filename base
+if 'original_filename' not in st.session_state:
+    st.session_state.original_filename = "transcript" # Default filename base
 
-transcribe_button = st.button("Transcribe Video", type="primary")
+transcribe_button = st.button("Transcribe Audio File", type="primary")
 
-if transcribe_button and youtube_url:
+if transcribe_button and uploaded_file is not None:
     st.session_state.transcript = "" # Clear previous transcript
+    st.session_state.original_filename = uploaded_file.name # Store filename for download
+
     with st.spinner("Processing... Please wait."):
-        # 1. Download Audio
-        audio_filepath = download_youtube_audio(youtube_url)
+        # 1. Read uploaded audio data
+        audio_data = uploaded_file.getvalue()
+        file_mimetype = uploaded_file.type # Get mimetype if provided by browser
 
-        if audio_filepath:
-            # 2. Transcribe Audio (run async function)
-            try:
-                # Get video title for potential filename use
-                try:
-                    yt = YouTube(youtube_url)
-                    st.session_state.video_title = yt.title.replace(" ", "_").replace("/","-") # Basic sanitization
-                except Exception:
-                    st.session_state.video_title = "transcript" # Fallback title
+        # 2. Transcribe Audio (run async function)
+        try:
+            transcript_text = asyncio.run(transcribe_uploaded_audio(audio_data, selected_language_code, file_mimetype))
+            st.session_state.transcript = transcript_text
+        except Exception as e:
+            st.error(f"An error occurred during transcription processing: {e}")
 
-                # Run the asynchronous transcription function
-                # asyncio.run() is suitable for simple cases in scripts/Streamlit
-                transcript_text = asyncio.run(transcribe_audio(audio_filepath, selected_language_code))
-                st.session_state.transcript = transcript_text
-
-            except Exception as e:
-                st.error(f"An error occurred during transcription: {e}")
-            finally:
-                # 3. Clean up temporary audio file
-                if os.path.exists(audio_filepath):
-                    try:
-                        os.remove(audio_filepath)
-                        st.info("Temporary audio file cleaned up.")
-                    except Exception as e:
-                        st.warning(f"Could not remove temporary file {audio_filepath}: {e}")
-        else:
-            st.warning("Could not proceed without downloaded audio.")
+elif transcribe_button and uploaded_file is None:
+    st.warning("Please upload an audio file first.")
 
 # --- Display Transcript ---
 if st.session_state.transcript:
@@ -189,7 +168,8 @@ if st.session_state.transcript:
     st.subheader("Download Transcript:")
     try:
         word_buffer = create_word_document(st.session_state.transcript)
-        file_name = f"{st.session_state.video_title}_{selected_language_code}.docx"
+        base_filename = sanitize_filename(st.session_state.original_filename)
+        file_name = f"{base_filename}_{selected_language_code}.docx"
 
         st.download_button(
             label="Download as Word (.docx)",
@@ -199,9 +179,6 @@ if st.session_state.transcript:
         )
     except Exception as e:
         st.error(f"Error creating download file: {e}")
-
-elif transcribe_button and not youtube_url:
-    st.warning("Please enter a YouTube URL.")
 
 st.markdown("---")
 st.caption("Powered by Deepgram and Streamlit")
