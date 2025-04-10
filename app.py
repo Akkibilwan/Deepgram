@@ -3,7 +3,7 @@ import streamlit as st
 import os
 import io
 import tempfile
-import yt_dlp  # yt-dlp for downloading/converting audio
+import yt_dlp  # yt-dlp for downloading and converting audio
 import re
 from datetime import datetime
 from deepgram import (
@@ -44,7 +44,7 @@ def load_api_key(key_name: str) -> str:
         st.error(f"Secrets error: {e}", icon="🚨")
         return ""
 
-# Load Deepgram and OpenAI API keys
+# Load API keys and initialize clients
 DEEPGRAM_API_KEY = load_api_key("DEEPGRAM_API_KEY")
 if not DEEPGRAM_API_KEY:
     st.stop()
@@ -53,19 +53,17 @@ if not OPENAI_API_KEY:
     st.error("OpenAI API key missing. Please add OPENAI_API_KEY to your secrets.", icon="🚨")
     st.stop()
 
-# Initialize Deepgram client
 @st.cache_resource
 def get_deepgram_client(api_key):
     try:
         config = DeepgramClientOptions(verbose=False)
-        deepgram = DeepgramClient(api_key, config)
-        return deepgram
+        return DeepgramClient(api_key, config)
     except Exception as e:
         st.error(f"Deepgram client init error: {e}", icon="🚨")
         st.stop()
 
 deepgram = get_deepgram_client(DEEPGRAM_API_KEY)
-openai.api_key = OPENAI_API_KEY  # Set OpenAI API key
+openai.api_key = OPENAI_API_KEY  # Set the OpenAI API key
 
 SUPPORTED_LANGUAGES = {
     "English": "en",
@@ -86,13 +84,12 @@ def sanitize_filename(filename: str) -> str:
         return "transcript"
     base = os.path.splitext(filename)[0]
     san = re.sub(r'[<>:"/\\|?*\s\.\t\n\r\f\v]+', '_', base)
-    san = san.strip('_-')
-    return san if san else "transcript"
+    return san.strip('_-') or "transcript"
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
-    Downloads audio using yt-dlp and converts it to a WAV file.
-    Returns the file path and video title.
+    Downloads the audio from the provided YouTube URL and converts it to WAV using yt-dlp.
+    Returns a tuple of the file path and the video title.
     """
     video_title = "audio_transcript"
     try:
@@ -102,7 +99,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         st.error(f"Failed to create temporary file: {e}", icon="❌")
         return None, None
 
-    # Set the output filename (base + '.wav')
     output_template = temp_audio_path + ".wav"
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -130,7 +126,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
             os.remove(output_template)
         return None, None
 
-    # FFmpeg postprocessor may append an extra ".wav"
     actual_filepath = output_template
     if not os.path.exists(actual_filepath):
         candidate = output_template + ".wav"
@@ -149,7 +144,7 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
 
 def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hint: str = "audio") -> str:
     """
-    Transcribes audio using Deepgram API synchronously.
+    Uses Deepgram to transcribe the given audio data.
     """
     try:
         payload: FileSource = {"buffer": audio_data}
@@ -158,9 +153,9 @@ def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hi
             smart_format=True,
             punctuate=True,
             numerals=True,
-            detect_language=True,  # Enable language detection
+            detect_language=True,
         )
-        st.info(f"Sending '{filename_hint}' (approx {len(audio_data)/1024:.1f} KB) to Deepgram...", icon="📤")
+        st.info(f"Sending '{filename_hint}' to Deepgram...", icon="📤")
         response = deepgram.listen.rest.v("1").transcribe_file(payload, options)
         transcript = ""
         detected_lang = "unknown"
@@ -184,14 +179,16 @@ def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hi
 
 def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: str = "audio") -> str:
     """
-    Transcribes audio using OpenAI Whisper.
-    The audio_file_obj is a file-like object (opened in binary mode).
-    Optionally, the language parameter is passed.
+    Uses OpenAI Whisper (via the new API) to transcribe the audio.
+    The audio_file_obj is a file-like object opened in binary mode.
     """
     try:
         st.info(f"Sending '{filename_hint}' to OpenAI Whisper...", icon="📤")
-        # Call the OpenAI transcription endpoint for Whisper ("whisper-1")
-        response = openai.Audio.transcribe("whisper-1", audio_file_obj, language=language_code)
+        response = openai.Audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file_obj,
+            language=language_code  # Pass the language code if desired
+        )
         transcript = response.get("text", "")
         if transcript:
             st.success("OpenAI Whisper transcription received!", icon="✅")
@@ -222,7 +219,7 @@ def create_word_document(text: str) -> io.BytesIO | None:
 st.title("🎬 YouTube Video Transcriber")
 st.markdown(
     """
-Enter a YouTube URL below. The app will download the audio track, transcribe it, 
+Enter a YouTube URL below. The app will download the audio track, transcribe it using either Deepgram or OpenAI Whisper,
 and display the transcript as text along with an option to download it as a Word (.docx) file.
 *(Requires `ffmpeg` installed in the backend via packages.txt)*
     """
@@ -256,7 +253,6 @@ if st.button("Transcribe"):
             filename_hint = sanitize_filename(video_title)
             transcript_text = ""
             try:
-                # For Deepgram, read audio data as bytes; for OpenAI, pass file object.
                 if transcription_engine == "Deepgram":
                     st.info("Reading downloaded WAV data for Deepgram...", icon="🎧")
                     with open(audio_filepath, "rb") as audio_file:
@@ -278,9 +274,8 @@ if st.button("Transcribe"):
                     os.remove(audio_filepath)
                     st.info("Temporary WAV file cleaned up.", icon="🧹")
                 except Exception as e:
-                    st.warning(f"Could not remove temp file: {e}", icon="⚠️")
+                    st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # --- Display Transcript and Download Option ---
             st.subheader(f"📄 Transcription Result for '{video_title}'")
             if transcript_text and transcript_text not in [
                 "[Transcription empty or failed]",
