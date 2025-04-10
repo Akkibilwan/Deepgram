@@ -90,7 +90,7 @@ def sanitize_filename(filename: str) -> str:
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
-    Downloads audio from a YouTube URL and converts it to WAV.
+    Downloads audio from a YouTube URL and converts it to a WAV file.
     Returns (file_path, video_title).
     """
     video_title = "audio_transcript"
@@ -200,8 +200,8 @@ def get_audio_duration(file_path: str) -> float:
 
 def split_audio_file(input_path: str, segment_duration: float) -> list:
     """
-    Splits the audio file into segments with duration (in seconds) specified by segment_duration.
-    Returns a sorted list of the generated segment file paths.
+    Splits the audio file into segments of the specified duration (in seconds) using ffmpeg.
+    Returns a sorted list of generated segment file paths.
     """
     base, ext = os.path.splitext(input_path)
     output_pattern = base + "_chunk_%03d" + ext
@@ -218,7 +218,7 @@ def split_audio_file(input_path: str, segment_duration: float) -> list:
     except Exception as e:
         st.error(f"Error during splitting: {e}", icon="❌")
         return []
-    # List and sort the generated chunk files
+    # List and sort the chunk files
     chunk_dir = os.path.dirname(input_path)
     chunks = sorted([os.path.join(chunk_dir, f) for f in os.listdir(chunk_dir)
                      if f.startswith(os.path.basename(base + "_chunk_")) and f.endswith(ext)])
@@ -227,23 +227,20 @@ def split_audio_file(input_path: str, segment_duration: float) -> list:
 def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: str = "audio") -> str:
     """
     Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
-    Expects a file path.
-    
-    If the file exceeds 25MB, it is split into segments that are below the limit and each segment is transcribed separately.
+    If the file exceeds 25MB, it is split into segments (with a safety margin) and each is transcribed separately.
     The resulting transcripts are joined and returned.
     """
     try:
         file_size = os.stat(file_path).st_size
-        limit = 25 * 1024 * 1024  # 25 MB in bytes
-        if file_size > limit:
+        # Use a safety margin of 1KB below the 25MB limit
+        safe_limit = 25 * 1024 * 1024 - 1024  
+        if file_size > safe_limit:
             st.info("Audio file exceeds 25MB. Splitting into smaller segments for OpenAI Whisper...", icon="🔄")
             duration = get_audio_duration(file_path)
             if duration <= 0:
                 return "[Transcription Error: unable to determine duration]"
-            # Calculate average bytes per second
             bytes_per_sec = file_size / duration
-            # Maximum segment duration such that segment size is below 25MB
-            max_seg_duration = 26214400 / bytes_per_sec  # 26214400 bytes = 25 MB limit
+            max_seg_duration = safe_limit / bytes_per_sec
             st.info(f"Splitting audio into segments of about {max_seg_duration:.1f} seconds...", icon="🔄")
             segments = split_audio_file(file_path, max_seg_duration)
             if not segments:
@@ -260,7 +257,7 @@ def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: s
                     )
                     seg_transcript = resp.get("text", "")
                     transcripts.append(seg_transcript)
-                os.remove(seg)  # Clean up segment file
+                os.remove(seg)
             transcript = " ".join(transcripts)
             return transcript
         else:
@@ -279,7 +276,7 @@ def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: s
 
 def translate_to_english(text: str) -> str:
     """
-    Translates the provided text to English using OpenAI's ChatCompletion.
+    Translates the provided text to English using OpenAI's ChatCompletion API.
     """
     try:
         st.info("Translating transcript to English...", icon="🔄")
@@ -295,7 +292,7 @@ def translate_to_english(text: str) -> str:
     except Exception as e:
         st.error("Translation failed.", icon="❌")
         st.exception(e)
-        return text  # Return original text if translation fails
+        return text
 
 def create_word_document(text: str) -> io.BytesIO | None:
     if not text or text == "[Transcription empty or failed]":
