@@ -1,5 +1,5 @@
-streamlit
-deepgram-sdk>=3.0
-python-docx
-aiohttp
-yt-dlp>=2023.12.30 # Specify a recent version or just yt-dlp for latest
+streamlit>=1.15.0
+yt-dlp>=2021.12.1
+python-docx>=0.8.11
+deepgram-sdk>=1.0.0
+openai>=0.27.0
