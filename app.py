@@ -183,23 +183,16 @@ def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: s
     Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
     Expects a file-like object (opened in binary mode).
     
-    For Hindi videos, we let Whisper auto-detect the language (by not forcing language parameter)
-    and then translate the result into English.
+    Now, we pass the language parameter even when it is Hindi ("hi"),
+    so that the API is forced to transcribe using Hindi.
     """
     try:
         st.info(f"Sending '{filename_hint}' to OpenAI Whisper...", icon="📤")
-        if language_code.lower() == "hi":
-            # Do not force language parameter for Hindi; let auto-detection work.
-            response = openai.Audio.transcribe(
-                model="whisper-1",
-                file=audio_file_obj
-            )
-        else:
-            response = openai.Audio.transcribe(
-                model="whisper-1",
-                file=audio_file_obj,
-                language=language_code
-            )
+        response = openai.Audio.transcribe(
+            model="whisper-1",
+            file=audio_file_obj,
+            language=language_code
+        )
         transcript = response.get("text", "")
         if transcript:
             st.success("OpenAI Whisper transcription received!", icon="✅")
@@ -250,7 +243,7 @@ def translate_to_english(text: str) -> str:
     except Exception as e:
         st.error("Translation failed.", icon="❌")
         st.exception(e)
-        return text
+        return text  # Return original text if translation fails
 
 def create_word_document(text: str) -> io.BytesIO | None:
     if not text or text == "[Transcription empty or failed]":
@@ -339,7 +332,7 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # For Hindi videos, translate the transcript to English.
+            # For Hindi videos, translate the Hindi transcript to English.
             if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]", "[Transcription Error]"]:
                 transcript_text = translate_to_english(transcript_text)
 
