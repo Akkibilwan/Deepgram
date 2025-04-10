@@ -2,4 +2,4 @@ streamlit
 deepgram-sdk>=3.0
 python-docx
 aiohttp
-yt-dlp # Add yt-dlp
+yt-dlp
