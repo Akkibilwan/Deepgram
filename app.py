@@ -57,7 +57,6 @@ def get_deepgram_client(api_key):
     try:
         config: DeepgramClientOptions = DeepgramClientOptions(verbose=False)
         deepgram: DeepgramClient = DeepgramClient(api_key, config)
-        # st.info("Deepgram client initialized.", icon="🎙️") # Reduce startup messages
         return deepgram
     except Exception as e:
         st.error(f"Fatal Error: Failed to initialize Deepgram client: {e}", icon="🚨")
@@ -73,7 +72,6 @@ SUPPORTED_LANGUAGES = {
 
 # --- Helper Functions ---
 
-# <<< MODIFIED Function >>>
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
     Downloads the best audio from URL using yt-dlp to a temporary file
@@ -86,23 +84,19 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     video_title = "audio_transcript"
 
     try:
-        # Suffix might be inaccurate now, yt-dlp will use the native one.
-        # Using .m4a as a common container guess.
         with tempfile.NamedTemporaryFile(delete=False, suffix=".m4a") as temp_audio:
             temp_audio_path = temp_audio.name
     except Exception as e:
         st.error(f"Failed to create temporary file: {e}", icon="❌")
         return None, None
 
-    # yt-dlp options - REMOVED 'postprocessors' key
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': temp_audio_path,
-        # --- REMOVED POSTPROCESSORS KEY ---
         'noplaylist': True,
         'quiet': False,
         'no_warnings': False,
-        'verbose': True, # <<< KEEP verbose logging enabled
+        'verbose': True, # Keep verbose logging enabled
         'socket_timeout': 45,
         'retries': 2,
         # 'ffmpeg_location': '/path/to/your/ffmpeg',
@@ -113,7 +107,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     progress_placeholder.info("Download in progress... See console/app logs for details.")
 
     def progress_hook(d):
-        # (Progress hook code remains the same)
         hook_status = d.get('status')
         filename = d.get('filename', '')
         info_dict = d.get('info_dict')
@@ -138,8 +131,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
                 st.info("Running yt-dlp direct download (verbose mode)...")
                 info_dict = ydl.extract_info(url, download=True)
                 video_title = info_dict.get('title', video_title)
-
-                # Assume yt-dlp respected outtmpl for now.
                 actual_filepath = temp_audio_path
 
                 if not os.path.exists(actual_filepath) or os.path.getsize(actual_filepath) == 0:
@@ -171,7 +162,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         return None, None
 
 
-# <<< Other helper functions remain unchanged >>>
 async def transcribe_audio_data(audio_data: bytes, language_code: str, filename_hint: str = "audio") -> str:
     """Transcribes audio data (bytes) using Deepgram asynchronously."""
     try:
@@ -225,7 +215,7 @@ def sanitize_filename(filename: str) -> str:
     sanitized = sanitized if sanitized else "transcript"
     return sanitized[:100]
 
-# --- Streamlit App UI --- (Remains Unchanged from previous version)
+# --- Streamlit App UI ---
 
 st.title("🎬 YouTube Video Transcriber")
 st.markdown("""
@@ -255,26 +245,29 @@ if 'video_title' not in st.session_state: st.session_state.video_title = "transc
 if 'processing' not in st.session_state: st.session_state.processing = False
 if 'current_url' not in st.session_state: st.session_state.current_url = ""
 
-# Initialize transcribe_button variable to avoid scope issues
-transcribe_button = False
-
+# --- Transcription Button and Logic ---
+# This section defines the button and handles the click to start processing
 if youtube_url:
-    transcribe_button = st.button(
+    transcribe_button = st.button( # Button is defined HERE
         f"Transcribe '{youtube_url[:50]}...' in {selected_language_name}",
         type="primary",
         disabled=st.session_state.processing,
         key="transcribe_button"
     )
+    # This block runs ONLY if the button defined above is clicked
     if transcribe_button and not st.session_state.processing:
         if not (youtube_url.startswith("http://") or youtube_url.startswith("https://")):
              st.warning("Please enter a valid starting with http:// or https://", icon="⚠️")
         else:
+            # Set flags to start processing on the next rerun
             st.session_state.processing = True
             st.session_state.transcript = ""
             st.session_state.current_url = youtube_url
             st.session_state.video_title = "transcript"
-            st.rerun()
+            st.rerun() # Trigger immediate rerun
 
+# --- Processing Block ---
+# This block runs only when the 'processing' flag is True (set by button click)
 if st.session_state.processing:
     url_to_process = st.session_state.current_url
     lang_code_to_process = selected_language_code
@@ -286,16 +279,17 @@ if st.session_state.processing:
         st.info(f"Processing URL: {url_to_process}", icon="⏳")
         audio_filepath = None
         transcript_text = ""
+        # Status indicator for download phase
         with st.spinner(f"Step 1/2: Downloading audio for '{url_to_process[:50]}...'"):
             try:
-                # --- Call the MODIFIED download function ---
                 audio_filepath, video_title = download_audio_yt_dlp(url_to_process)
                 st.session_state.video_title = video_title if video_title else "downloaded_audio"
             except Exception as e:
                 st.error(f"Error during audio download phase: {e}", icon="❌")
-                st.session_state.processing = False
+                st.session_state.processing = False # Stop processing on critical download error
                 st.rerun()
 
+        # Proceed to transcription only if download seemed successful
         if audio_filepath and os.path.exists(audio_filepath):
             with st.spinner(f"Step 2/2: Transcribing audio using Deepgram ({lang_code_to_process})..."):
                 try:
@@ -308,11 +302,12 @@ if st.session_state.processing:
                         transcript_text = asyncio.run(
                             transcribe_audio_data(audio_data, lang_code_to_process, filename_hint)
                         )
-                        st.session_state.transcript = transcript_text
+                        st.session_state.transcript = transcript_text # Store result
                 except Exception as e:
                     st.error(f"Error during transcription phase: {e}", icon="❌")
-                    st.session_state.transcript = ""
+                    st.session_state.transcript = "" # Clear transcript on error
                 finally:
+                    # Clean up temp file regardless of transcription success/failure
                     if os.path.exists(audio_filepath):
                         try:
                             os.remove(audio_filepath)
@@ -320,12 +315,17 @@ if st.session_state.processing:
                         except Exception as e:
                             st.warning(f"Could not remove temporary file {audio_filepath}: {e}", icon="⚠️")
         else:
+            # Download failed or file was missing
             st.warning("Transcription step skipped because audio download failed.", icon="⚠️")
-            st.session_state.transcript = ""
+            st.session_state.transcript = "" # Ensure transcript is empty
 
+        # Processing finished, reset flag and rerun to display results/enable button
         st.session_state.processing = False
         st.rerun()
 
+
+# --- Display Transcript & Download ---
+# This runs after processing is complete and the 'processing' flag is False
 if st.session_state.transcript:
     st.subheader(f"📄 Transcription Result for '{st.session_state.video_title}'")
     st.text_area(
@@ -342,11 +342,14 @@ if st.session_state.transcript:
             key="download_word_button", help="Click to download the transcript as a Microsoft Word file."
         )
     else: st.error("Could not generate the Word document for download.", icon="📄")
-# Fixed this condition by removing the reference to transcribe_button
-elif not youtube_url:
-    st.warning("Please enter a YouTube URL.")
-    st.session_state.processing = False
 
+# --- REMOVED Problematic elif block ---
+# The following block caused the NameError and has been removed:
+# elif transcribe_button and not youtube_url:
+#     st.warning("Please enter a YouTube URL.")
+#     st.session_state.processing = False
+
+# --- Footer ---
 st.markdown("---")
 current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.caption(f"Powered by Deepgram, yt-dlp, and Streamlit. | App loaded: {current_time_str}")
