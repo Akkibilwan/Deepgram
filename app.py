@@ -5,6 +5,7 @@ import io
 import tempfile
 import yt_dlp  # For downloading and converting audio
 import re
+import subprocess
 from datetime import datetime
 from deepgram import (
     DeepgramClient,
@@ -88,7 +89,7 @@ def sanitize_filename(filename: str) -> str:
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
-    Downloads audio from a YouTube URL and converts it to WAV.
+    Downloads audio from a YouTube URL and converts it to a WAV file.
     Returns (file_path, video_title).
     """
     video_title = "audio_transcript"
@@ -181,7 +182,6 @@ def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: s
     """
     Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
     Expects a file-like object (opened in binary mode).
-    Note: Ensure your audio file does not exceed OpenAI's size limits.
     """
     try:
         st.info(f"Sending '{filename_hint}' to OpenAI Whisper...", icon="📤")
@@ -202,9 +202,29 @@ def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: s
         st.exception(e)
         return ""
 
+def downsample_audio(input_path: str, output_path: str) -> bool:
+    """
+    Downsamples/re-encodes the audio to reduce file size for OpenAI Whisper.
+    The command converts audio to a 16kHz mono WAV at a lower bitrate.
+    """
+    command = [
+        "ffmpeg", "-i", input_path,
+        "-ar", "16000",     # Set sample rate to 16kHz
+        "-ac", "1",         # Set channel to mono
+        "-b:a", "64k",      # Set bitrate lower
+        output_path,
+        "-y"                # Overwrite output file if exists
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+        return True
+    except Exception as e:
+        st.error(f"Error during downsampling: {e}", icon="❌")
+        return False
+
 def translate_to_english(text: str) -> str:
     """
-    Translates the provided text to English using OpenAI's ChatCompletion endpoint.
+    Translates the provided text to English using OpenAI's ChatCompletion.
     """
     try:
         st.info("Translating transcript to English...", icon="🔄")
@@ -220,7 +240,7 @@ def translate_to_english(text: str) -> str:
     except Exception as e:
         st.error("Translation failed.", icon="❌")
         st.exception(e)
-        return text  # In case of error, return the original transcript
+        return text  # Return original if translation fails
 
 def create_word_document(text: str) -> io.BytesIO | None:
     if not text or text == "[Transcription empty or failed]":
@@ -284,9 +304,23 @@ if st.button("Transcribe"):
                     else:
                         transcript_text = transcribe_audio_deepgram(audio_data, selected_language_code, filename_hint)
                 elif transcription_engine == "OpenAI Whisper":
-                    st.info("Reading downloaded WAV data for OpenAI Whisper...", icon="🎧")
-                    with open(audio_filepath, "rb") as audio_file:
+                    st.info("Preparing audio for OpenAI Whisper...", icon="🎧")
+                    # Check file size; if larger than 25MB, downsample it.
+                    file_size = os.stat(audio_filepath).st_size
+                    if file_size > 25 * 1024 * 1024:
+                        st.info("Audio file exceeds 25MB. Downsampling for OpenAI Whisper...", icon="🔄")
+                        downsampled_path = audio_filepath + "_downsampled.wav"
+                        success = downsample_audio(audio_filepath, downsampled_path)
+                        if success:
+                            target_file = downsampled_path
+                        else:
+                            target_file = audio_filepath
+                    else:
+                        target_file = audio_filepath
+                    with open(target_file, "rb") as audio_file:
                         transcript_text = transcribe_audio_openai(audio_file, selected_language_code, filename_hint)
+                    if target_file != audio_filepath and os.path.exists(target_file):
+                        os.remove(target_file)
             except Exception as e:
                 st.error(f"Transcription error: {e}", icon="❌")
                 transcript_text = "[Transcription Error]"
@@ -297,7 +331,7 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # If the expected language is Hindi, translate to English.
+            # If the selected language is Hindi, translate transcript to English.
             if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]"]:
                 transcript_text = translate_to_english(transcript_text)
 
