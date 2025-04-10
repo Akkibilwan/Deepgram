@@ -255,6 +255,9 @@ if 'video_title' not in st.session_state: st.session_state.video_title = "transc
 if 'processing' not in st.session_state: st.session_state.processing = False
 if 'current_url' not in st.session_state: st.session_state.current_url = ""
 
+# Initialize transcribe_button variable to avoid scope issues
+transcribe_button = False
+
 if youtube_url:
     transcribe_button = st.button(
         f"Transcribe '{youtube_url[:50]}...' in {selected_language_name}",
@@ -339,7 +342,8 @@ if st.session_state.transcript:
             key="download_word_button", help="Click to download the transcript as a Microsoft Word file."
         )
     else: st.error("Could not generate the Word document for download.", icon="📄")
-elif transcribe_button and not youtube_url:
+# Fixed this condition by removing the reference to transcribe_button
+elif not youtube_url:
     st.warning("Please enter a YouTube URL.")
     st.session_state.processing = False
 
