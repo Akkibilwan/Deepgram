@@ -6,6 +6,7 @@ import tempfile
 import yt_dlp  # For downloading and converting audio
 import re
 import subprocess
+import json
 from datetime import datetime
 from deepgram import (
     DeepgramClient,
@@ -89,7 +90,7 @@ def sanitize_filename(filename: str) -> str:
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
-    Downloads audio from a YouTube URL and converts it to a WAV file.
+    Downloads audio from a YouTube URL and converts it to WAV.
     Returns (file_path, video_title).
     """
     video_title = "audio_transcript"
@@ -178,52 +179,103 @@ def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hi
         st.exception(e)
         return ""
 
-def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: str = "audio") -> str:
+def get_audio_duration(file_path: str) -> float:
     """
-    Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
-    Expects a file-like object (opened in binary mode).
-    
-    Now, we pass the language parameter even when it is Hindi ("hi"),
-    so that the API is forced to transcribe using Hindi.
+    Uses ffprobe to return the duration (in seconds) of the audio file.
     """
     try:
-        st.info(f"Sending '{filename_hint}' to OpenAI Whisper...", icon="📤")
-        response = openai.Audio.transcribe(
-            model="whisper-1",
-            file=audio_file_obj,
-            language=language_code
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
         )
-        transcript = response.get("text", "")
-        if transcript:
-            st.success("OpenAI Whisper transcription received!", icon="✅")
-            return transcript
-        else:
-            st.warning("OpenAI Whisper transcription completed but no text was detected.", icon="⚠️")
-            return "[Transcription empty or failed]"
+        info = json.loads(result.stdout)
+        duration = float(info['format']['duration'])
+        return duration
     except Exception as e:
-        st.error("OpenAI Whisper transcription failed.", icon="❌")
-        st.exception(e)
-        return ""
+        st.error(f"Error getting duration: {e}", icon="❌")
+        return 0.0
 
-def downsample_audio(input_path: str, output_path: str) -> bool:
+def split_audio_file(input_path: str, segment_duration: float) -> list:
     """
-    Downsamples/re-encodes the audio to reduce file size for OpenAI Whisper.
-    Converts audio to 16kHz mono WAV with lower bitrate.
+    Splits the audio file into segments with duration (in seconds) specified by segment_duration.
+    Returns a sorted list of the generated segment file paths.
     """
+    base, ext = os.path.splitext(input_path)
+    output_pattern = base + "_chunk_%03d" + ext
     command = [
         "ffmpeg", "-i", input_path,
-        "-ar", "16000",
-        "-ac", "1",
-        "-b:a", "64k",
-        output_path,
+        "-f", "segment",
+        "-segment_time", str(segment_duration),
+        "-c", "copy",
+        output_pattern,
         "-y"
     ]
     try:
         subprocess.run(command, check=True, capture_output=True)
-        return True
     except Exception as e:
-        st.error(f"Error during downsampling: {e}", icon="❌")
-        return False
+        st.error(f"Error during splitting: {e}", icon="❌")
+        return []
+    # List and sort the generated chunk files
+    chunk_dir = os.path.dirname(input_path)
+    chunks = sorted([os.path.join(chunk_dir, f) for f in os.listdir(chunk_dir)
+                     if f.startswith(os.path.basename(base + "_chunk_")) and f.endswith(ext)])
+    return chunks
+
+def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: str = "audio") -> str:
+    """
+    Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
+    Expects a file path.
+    
+    If the file exceeds 25MB, it is split into segments that are below the limit and each segment is transcribed separately.
+    The resulting transcripts are joined and returned.
+    """
+    try:
+        file_size = os.stat(file_path).st_size
+        limit = 25 * 1024 * 1024  # 25 MB in bytes
+        if file_size > limit:
+            st.info("Audio file exceeds 25MB. Splitting into smaller segments for OpenAI Whisper...", icon="🔄")
+            duration = get_audio_duration(file_path)
+            if duration <= 0:
+                return "[Transcription Error: unable to determine duration]"
+            # Calculate average bytes per second
+            bytes_per_sec = file_size / duration
+            # Maximum segment duration such that segment size is below 25MB
+            max_seg_duration = 26214400 / bytes_per_sec  # 26214400 bytes = 25 MB limit
+            st.info(f"Splitting audio into segments of about {max_seg_duration:.1f} seconds...", icon="🔄")
+            segments = split_audio_file(file_path, max_seg_duration)
+            if not segments:
+                st.error("Failed to split the audio file.", icon="❌")
+                return "[Transcription Error]"
+            transcripts = []
+            for seg in segments:
+                st.info(f"Transcribing segment: {seg}", icon="📤")
+                with open(seg, "rb") as af:
+                    resp = openai.Audio.transcribe(
+                        model="whisper-1",
+                        file=af,
+                        language=language_code
+                    )
+                    seg_transcript = resp.get("text", "")
+                    transcripts.append(seg_transcript)
+                os.remove(seg)  # Clean up segment file
+            transcript = " ".join(transcripts)
+            return transcript
+        else:
+            with open(file_path, "rb") as af:
+                response = openai.Audio.transcribe(
+                    model="whisper-1",
+                    file=af,
+                    language=language_code
+                )
+                transcript = response.get("text", "")
+                return transcript if transcript else "[Transcription empty or failed]"
+    except Exception as e:
+        st.error("OpenAI Whisper transcription failed.", icon="❌")
+        st.exception(e)
+        return ""
 
 def translate_to_english(text: str) -> str:
     """
@@ -299,29 +351,16 @@ if st.button("Transcribe"):
             try:
                 if transcription_engine == "Deepgram":
                     st.info("Reading downloaded WAV data for Deepgram...", icon="🎧")
-                    with open(audio_filepath, "rb") as audio_file:
-                        audio_data = audio_file.read()
+                    with open(audio_filepath, "rb") as af:
+                        audio_data = af.read()
                     if not audio_data:
                         st.error("Failed to read downloaded audio data.", icon="⚠️")
                         transcript_text = "[File Read Error]"
                     else:
                         transcript_text = transcribe_audio_deepgram(audio_data, selected_language_code, filename_hint)
                 elif transcription_engine == "OpenAI Whisper":
-                    st.info("Preparing audio for OpenAI Whisper...", icon="🎧")
-                    file_size = os.stat(audio_filepath).st_size
-                    if file_size > 25 * 1024 * 1024:
-                        st.info("Audio file exceeds 25MB. Downsampling for OpenAI Whisper...", icon="🔄")
-                        downsampled_path = audio_filepath + "_downsampled.wav"
-                        if downsample_audio(audio_filepath, downsampled_path):
-                            target_file = downsampled_path
-                        else:
-                            target_file = audio_filepath
-                    else:
-                        target_file = audio_filepath
-                    with open(target_file, "rb") as audio_file:
-                        transcript_text = transcribe_audio_openai(audio_file, selected_language_code, filename_hint)
-                    if target_file != audio_filepath and os.path.exists(target_file):
-                        os.remove(target_file)
+                    st.info("Processing audio for OpenAI Whisper...", icon="🎧")
+                    transcript_text = transcribe_audio_openai(audio_filepath, selected_language_code, filename_hint)
             except Exception as e:
                 st.error(f"Transcription error: {e}", icon="❌")
                 transcript_text = "[Transcription Error]"
@@ -332,7 +371,7 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # For Hindi videos, translate the Hindi transcript to English.
+            # For Hindi videos, translate the transcript to English.
             if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]", "[Transcription Error]"]:
                 transcript_text = translate_to_english(transcript_text)
 
