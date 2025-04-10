@@ -182,14 +182,24 @@ def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: s
     """
     Transcribes audio using OpenAI Whisper via openai.Audio.transcribe.
     Expects a file-like object (opened in binary mode).
+    
+    For Hindi videos, we let Whisper auto-detect the language (by not forcing language parameter)
+    and then translate the result into English.
     """
     try:
         st.info(f"Sending '{filename_hint}' to OpenAI Whisper...", icon="📤")
-        response = openai.Audio.transcribe(
-            model="whisper-1",
-            file=audio_file_obj,
-            language=language_code
-        )
+        if language_code.lower() == "hi":
+            # Do not force language parameter for Hindi; let auto-detection work.
+            response = openai.Audio.transcribe(
+                model="whisper-1",
+                file=audio_file_obj
+            )
+        else:
+            response = openai.Audio.transcribe(
+                model="whisper-1",
+                file=audio_file_obj,
+                language=language_code
+            )
         transcript = response.get("text", "")
         if transcript:
             st.success("OpenAI Whisper transcription received!", icon="✅")
@@ -205,15 +215,15 @@ def transcribe_audio_openai(audio_file_obj, language_code: str, filename_hint: s
 def downsample_audio(input_path: str, output_path: str) -> bool:
     """
     Downsamples/re-encodes the audio to reduce file size for OpenAI Whisper.
-    The command converts audio to a 16kHz mono WAV at a lower bitrate.
+    Converts audio to 16kHz mono WAV with lower bitrate.
     """
     command = [
         "ffmpeg", "-i", input_path,
-        "-ar", "16000",     # Set sample rate to 16kHz
-        "-ac", "1",         # Set channel to mono
-        "-b:a", "64k",      # Set bitrate lower
+        "-ar", "16000",
+        "-ac", "1",
+        "-b:a", "64k",
         output_path,
-        "-y"                # Overwrite output file if exists
+        "-y"
     ]
     try:
         subprocess.run(command, check=True, capture_output=True)
@@ -240,7 +250,7 @@ def translate_to_english(text: str) -> str:
     except Exception as e:
         st.error("Translation failed.", icon="❌")
         st.exception(e)
-        return text  # Return original if translation fails
+        return text
 
 def create_word_document(text: str) -> io.BytesIO | None:
     if not text or text == "[Transcription empty or failed]":
@@ -305,13 +315,11 @@ if st.button("Transcribe"):
                         transcript_text = transcribe_audio_deepgram(audio_data, selected_language_code, filename_hint)
                 elif transcription_engine == "OpenAI Whisper":
                     st.info("Preparing audio for OpenAI Whisper...", icon="🎧")
-                    # Check file size; if larger than 25MB, downsample it.
                     file_size = os.stat(audio_filepath).st_size
                     if file_size > 25 * 1024 * 1024:
                         st.info("Audio file exceeds 25MB. Downsampling for OpenAI Whisper...", icon="🔄")
                         downsampled_path = audio_filepath + "_downsampled.wav"
-                        success = downsample_audio(audio_filepath, downsampled_path)
-                        if success:
+                        if downsample_audio(audio_filepath, downsampled_path):
                             target_file = downsampled_path
                         else:
                             target_file = audio_filepath
@@ -331,8 +339,8 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # If the selected language is Hindi, translate transcript to English.
-            if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]"]:
+            # For Hindi videos, translate the transcript to English.
+            if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]", "[Transcription Error]"]:
                 transcript_text = translate_to_english(transcript_text)
 
             st.subheader(f"📄 Transcription Result for '{video_title}'")
