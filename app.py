@@ -19,7 +19,7 @@ import openai
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="YouTube Transcriber (yt-dlp)",
+    page_title="YouTube Transcriber (SRT)",
     layout="wide",
     initial_sidebar_state="auto"
 )
@@ -35,7 +35,7 @@ It uses ffmpeg to convert the downloaded audio to WAV. Please monitor logs for a
 # --- Helper Functions ---
 
 def format_time(seconds: float) -> str:
-    """Formats seconds as SRT time string (HH:MM:SS,mmm)."""
+    """Formats a time in seconds into the SRT timestamp format (HH:MM:SS,mmm)."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
@@ -43,19 +43,19 @@ def format_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{milliseconds:03d}"
 
 def build_single_srt(transcript: str, duration: float) -> str:
-    """Builds a single SRT block for the given transcript and audio duration."""
-    start = "00:00:00,000"
-    end = format_time(duration)
-    return f"1\n{start} --> {end}\n{transcript.strip()}\n\n"
+    """Builds a single SRT block from 0 to the full duration."""
+    start_time = "00:00:00,000"
+    end_time = format_time(duration)
+    return f"1\n{start_time} --> {end_time}\n{transcript.strip()}\n\n"
 
 @st.cache_data
 def load_api_key(key_name: str) -> str:
     try:
-        api_key = st.secrets[key_name]
-        if not api_key or api_key == f"YOUR_{key_name}_HERE" or len(api_key) < 20:
+        key = st.secrets[key_name]
+        if not key or key == f"YOUR_{key_name}_HERE" or len(key) < 20:
             st.error(f"Error: {key_name} missing/invalid.", icon="🚨")
             return ""
-        return api_key
+        return key
     except Exception as e:
         st.error(f"Secrets error: {e}", icon="🚨")
         return ""
@@ -105,7 +105,7 @@ def sanitize_filename(filename: str) -> str:
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
     Downloads audio from a YouTube URL and converts it to a WAV file.
-    Returns (file_path, video_title).
+    Returns a tuple (file_path, video_title).
     """
     video_title = "audio_transcript"
     try:
@@ -130,7 +130,6 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         'retries': 2,
         'overwrites': True,
     }
-
     st.info("Downloading and converting audio to WAV... (requires ffmpeg)")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -170,16 +169,15 @@ def get_audio_duration(file_path: str) -> float:
             check=True
         )
         info = json.loads(result.stdout)
-        duration = float(info['format']['duration'])
-        return duration
+        return float(info['format']['duration'])
     except Exception as e:
         st.error(f"Error getting duration: {e}", icon="❌")
         return 0.0
 
 def split_audio_file(input_path: str, segment_duration: float) -> list:
     """
-    Splits the audio file into segments of the specified duration (in seconds) using ffmpeg.
-    Returns a sorted list of generated segment file paths.
+    Splits the audio file into segments of the specified duration (seconds) using ffmpeg.
+    Returns a sorted list of the segment file paths.
     """
     base, ext = os.path.splitext(input_path)
     output_pattern = base + "_chunk_%03d" + ext
@@ -201,15 +199,10 @@ def split_audio_file(input_path: str, segment_duration: float) -> list:
                      if f.startswith(os.path.basename(base + "_chunk_")) and f.endswith(ext)])
     return chunks
 
-def build_single_srt(transcript: str, duration: float) -> str:
-    """Generates an SRT block for the entire audio with a single entry."""
-    start = "00:00:00,000"
-    end = format_time(duration)
-    return f"1\n{start} --> {end}\n{transcript.strip()}\n\n"
-
-def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hint: str, file_duration: float) -> str:
+def transcribe_deepgram_srt(audio_data: bytes, language_code: str, filename_hint: str, file_duration: float) -> str:
     """
-    Transcribes audio using Deepgram and returns an SRT with one block covering the whole duration.
+    Transcribes audio using Deepgram and generates one SRT block for the entire duration.
+    Deepgram does not provide timestamps, so we use the full duration for a single block.
     """
     try:
         payload: FileSource = {"buffer": audio_data}
@@ -228,9 +221,7 @@ def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hi
             first_channel = response.results.channels[0]
             detected_lang = getattr(first_channel, 'detected_language', detected_lang)
             if first_channel and first_channel.alternatives:
-                first_alternative = first_channel.alternatives[0]
-                if first_alternative and hasattr(first_alternative, 'transcript'):
-                    transcript = first_alternative.transcript.strip()
+                transcript = first_channel.alternatives[0].transcript.strip() if hasattr(first_channel.alternatives[0], 'transcript') else ""
         if transcript:
             st.success(f"Deepgram transcription received! (Detected Language: {detected_lang})", icon="✅")
             return build_single_srt(transcript, file_duration)
@@ -242,24 +233,23 @@ def transcribe_audio_deepgram(audio_data: bytes, language_code: str, filename_hi
         st.exception(e)
         return ""
 
-def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: str) -> str:
+def transcribe_openai_srt(file_path: str, language_code: str, filename_hint: str) -> str:
     """
-    Transcribes audio using OpenAI Whisper and returns the transcript in SRT format.
-    If the file exceeds the safe limit, it is split into segments.
+    Transcribes audio using OpenAI Whisper and generates SRT subtitles.
+    If file size exceeds the safe limit, it is split into segments, each transcribed separately.
+    Returns the concatenated SRT entries.
     """
     try:
         file_size = os.stat(file_path).st_size
-        # Use a safe limit: 25 MB minus 2 KB
-        safe_limit = 25 * 1024 * 1024 - 2048
+        safe_limit = 25 * 1024 * 1024 - 2048  # 25 MB minus 2KB margin
         if file_size > safe_limit:
             st.info("Audio file exceeds safe limit. Splitting into segments for OpenAI Whisper...", icon="🔄")
             duration = get_audio_duration(file_path)
             if duration <= 0:
                 return "[Transcription Error: unable to determine duration]"
             bytes_per_sec = file_size / duration
-            # Compute maximum segment duration in seconds, then apply a 2% margin
-            max_seg_duration = (safe_limit / bytes_per_sec) * 0.98
-            st.info(f"Splitting audio into segments of about {max_seg_duration:.1f} seconds...", icon="🔄")
+            max_seg_duration = (safe_limit / bytes_per_sec) * 0.98  # additional 2% margin
+            st.info(f"Splitting audio into segments of ~{max_seg_duration:.1f} seconds...", icon="🔄")
             segments = split_audio_file(file_path, max_seg_duration)
             if not segments:
                 st.error("Failed to split the audio file.", icon="❌")
@@ -280,7 +270,7 @@ def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: s
                 srt_entry = f"{i}\n{start_time} --> {end_time}\n{seg_transcript}\n\n"
                 srt_entries.append(srt_entry)
                 cumulative_time += seg_duration
-                os.remove(seg)
+                os.remove(seg)  # Clean up the segment
             return "".join(srt_entries)
         else:
             with open(file_path, "rb") as af:
@@ -299,11 +289,12 @@ def transcribe_audio_openai(file_path: str, language_code: str, filename_hint: s
 
 def translate_to_english(text: str) -> str:
     """
-    Translates the provided text (in SRT format) to English using OpenAI's ChatCompletion.
+    Translates the given SRT transcript text to English using OpenAI ChatCompletion.
+    The prompt instructs to keep the SRT timestamps intact.
     """
     try:
         st.info("Translating transcript to English...", icon="🔄")
-        prompt = f"Translate the following subtitles to English, keeping the timestamps intact. Only translate the dialogue lines:\n\n{text}"
+        prompt = f"Translate the following subtitles to English while keeping the timestamps unchanged. Only translate the dialogue lines:\n\n{text}"
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
@@ -332,18 +323,19 @@ def create_word_document(text: str) -> io.BytesIO | None:
         return None
 
 # --- Main App UI ---
-st.title("🎬 YouTube Video Transcriber")
+st.title("🎬 YouTube Video Transcriber (SRT Output)")
 st.markdown(
     """
 Enter a YouTube URL below. The app will download the audio track, transcribe it using either Deepgram or OpenAI Whisper,
-and generate a transcript in SRT (SubRip Subtitle) format. The transcript is displayed and can be downloaded as a Word (.docx) file.
-*(Requires `ffmpeg` installed in the backend via packages.txt)*
+and generate the transcript in SRT (SubRip Subtitle) format with timestamps.
+You can also download the SRT transcript as a Word (.docx) file.
+*(Requires `ffmpeg` installed via packages.txt)*
     """
 )
 
 youtube_url = st.text_input("Enter YouTube URL:", placeholder="e.g., https://www.youtube.com/watch?v=...")
 selected_language_name = st.selectbox(
-    "Audio Language (Note: Language detection enabled)",
+    "Audio Language (Language detection enabled)",
     options=list(SUPPORTED_LANGUAGES.keys()),
     index=0,
     help="Select the expected audio language. (If Hindi is selected, the transcript will be translated to English.)"
@@ -367,26 +359,24 @@ if st.button("Transcribe"):
             st.error("Download or conversion failed. Cannot proceed with transcription.", icon="❌")
         else:
             filename_hint = sanitize_filename(video_title)
-            transcript_text = ""
+            transcript_srt = ""
             try:
                 if transcription_engine == "Deepgram":
                     st.info("Reading downloaded WAV data for Deepgram...", icon="🎧")
-                    # Get full duration before removal
                     full_duration = get_audio_duration(audio_filepath)
                     with open(audio_filepath, "rb") as af:
                         audio_data = af.read()
                     if not audio_data:
                         st.error("Failed to read downloaded audio data.", icon="⚠️")
-                        transcript_text = "[File Read Error]"
+                        transcript_srt = "[Transcription empty or failed]"
                     else:
-                        # Generate SRT for the whole audio as one block.
-                        transcript_text = transcribe_audio_deepgram(audio_data, selected_language_code, filename_hint, full_duration)
+                        transcript_srt = transcribe_deepgram_srt(audio_data, selected_language_code, filename_hint, full_duration)
                 elif transcription_engine == "OpenAI Whisper":
                     st.info("Processing audio for OpenAI Whisper...", icon="🎧")
-                    transcript_text = transcribe_audio_openai(audio_filepath, selected_language_code, filename_hint)
+                    transcript_srt = transcribe_openai_srt(audio_filepath, selected_language_code, filename_hint)
             except Exception as e:
                 st.error(f"Transcription error: {e}", icon="❌")
-                transcript_text = "[Transcription Error]"
+                transcript_srt = "[Transcription empty or failed]"
             finally:
                 try:
                     os.remove(audio_filepath)
@@ -394,18 +384,14 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # For Hindi videos, translate the SRT transcript to English.
-            if selected_language_name.lower() == "hindi" and transcript_text not in ["", "[Transcription empty or failed]", "[Transcription Error]"]:
-                transcript_text = translate_to_english(transcript_text)
+            # If Hindi was selected, translate the SRT transcript to English.
+            if selected_language_name.lower() == "hindi" and transcript_srt not in ["", "[Transcription empty or failed]"]:
+                transcript_srt = translate_to_english(transcript_srt)
 
             st.subheader(f"📄 SRT Transcript for '{video_title}'")
-            if transcript_text and transcript_text not in [
-                "[Transcription empty or failed]",
-                "[File Read Error]",
-                "[Transcription Error]",
-            ]:
-                st.text_area("Transcript (SRT Format):", transcript_text, height=350)
-                word_buffer = create_word_document(transcript_text)
+            if transcript_srt and transcript_srt not in ["", "[Transcription empty or failed]"]:
+                st.text_area("Transcript (SRT Format):", transcript_srt, height=350)
+                word_buffer = create_word_document(transcript_srt)
                 if word_buffer:
                     base_filename = sanitize_filename(video_title)
                     file_name = f"{base_filename}_transcript.srt.docx"
