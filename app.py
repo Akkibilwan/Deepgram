@@ -104,8 +104,8 @@ def sanitize_filename(filename: str) -> str:
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
-    Downloads audio from a YouTube URL and converts it to WAV.
-    Returns (file_path, video_title).
+    Downloads audio from a YouTube URL and converts it to a WAV file.
+    Returns a tuple (file_path, video_title).
     """
     video_title = "audio_transcript"
     try:
@@ -116,7 +116,18 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         return None, None
 
     output_template = temp_audio_path + ".wav"
-    # Updated yt-dlp options with a custom User-Agent header.
+    
+    # Optional: Write cookies to a temporary file if provided in secrets.
+    cookies_path = None
+    if "COOKIES" in st.secrets:
+        try:
+            cookies_content = st.secrets["COOKIES"]
+            with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".txt") as cookie_file:
+                cookie_file.write(cookies_content)
+                cookies_path = cookie_file.name
+        except Exception as e:
+            st.error(f"Error writing cookies to temporary file: {e}", icon="❌")
+    
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_template,
@@ -133,9 +144,9 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.188 Safari/537.36'
         },
-        # Uncomment and update the following line if you need to use cookies:
-        # 'cookies': 'path/to/your/cookies.txt'
     }
+    if cookies_path:
+        ydl_opts['cookiefile'] = cookies_path
 
     st.info("Downloading and converting audio to WAV... (requires ffmpeg)")
     try:
@@ -147,6 +158,9 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         if os.path.exists(output_template):
             os.remove(output_template)
         return None, None
+    finally:
+        if cookies_path and os.path.exists(cookies_path):
+            os.remove(cookies_path)
 
     actual_filepath = output_template
     if not os.path.exists(actual_filepath):
@@ -160,8 +174,7 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
             os.remove(actual_filepath)
         return None, None
 
-    st.success(f"Audio download & conversion completed: '{video_title}' "
-               f"({os.path.getsize(actual_filepath)/1024/1024:.2f} MB).")
+    st.success(f"Audio download & conversion completed: '{video_title}' ({os.path.getsize(actual_filepath)/1024/1024:.2f} MB).")
     return actual_filepath, video_title
 
 def get_audio_duration(file_path: str) -> float:
@@ -182,17 +195,16 @@ def get_audio_duration(file_path: str) -> float:
         st.error(f"Error getting duration: {e}", icon="❌")
         return 0.0
 
-# The remainder of your code remains unchanged...
-# (Including functions for transcription, SRT generation, translation, and the main UI)
-# For brevity, only the download_audio_yt_dlp function was updated with the custom HTTP header.
+# --- The rest of your transcription and SRT generation functions would remain the same as before ---
+# For brevity, only the download function has been updated to include cookies.
 
 st.title("🎬 YouTube Video Transcriber (SRT Output)")
 st.markdown(
     """
 Enter a YouTube URL below. The app will download the audio track, transcribe it using either Deepgram or OpenAI Whisper,
-and generate the transcript in SRT (SubRip Subtitle) format with timestamps.
+and generate an SRT (SubRip Subtitle) transcript with timestamps.
 You can also download the SRT transcript as a Word (.docx) file.
-*(Requires `ffmpeg` installed in the backend via packages.txt)*
+*(Requires `ffmpeg` installed via packages.txt)*
     """
 )
 
@@ -204,11 +216,9 @@ selected_language_name = st.selectbox(
     help="Select the expected audio language. (If Hindi is selected, the transcript will be translated to English.)"
 )
 selected_language_code = SUPPORTED_LANGUAGES[selected_language_name]
-# (Include your transcription and SRT generation functions below as before.)
-# For example, functions to split audio, transcribe using Deepgram/OpenAI, generate SRT, etc.
 
-# ... (Rest of your code remains the same as your previous version)
+# (Include your transcription, SRT generation, translation, and main UI code below as before.)
 
-# In your main UI, you would use download_audio_yt_dlp() to download the video,
-# then transcribe and generate the SRT subtitles, and finally display and allow download.
-
+st.markdown("---")
+current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+st.caption(f"Powered by Deepgram, OpenAI Whisper, yt-dlp, and Streamlit. | App loaded: {current_time_str}")
