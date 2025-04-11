@@ -26,7 +26,7 @@ st.set_page_config(
 
 st.warning(
     """
-**Dependency Alert:** This app relies on `ffmpeg` being installed via `packages.txt`. 
+**Dependency Alert:** This app relies on `ffmpeg` being installed via `packages.txt`.
 It uses ffmpeg to convert the downloaded audio to WAV. Please monitor logs for any ffmpeg errors.
 """,
     icon="ℹ️"
@@ -35,7 +35,7 @@ It uses ffmpeg to convert the downloaded audio to WAV. Please monitor logs for a
 # --- Helper Functions ---
 
 def format_time(seconds: float) -> str:
-    """Formats a time in seconds into the SRT timestamp format (HH:MM:SS,mmm)."""
+    """Formats a time in seconds into SRT timestamp format (HH:MM:SS,mmm)."""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
@@ -43,7 +43,7 @@ def format_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{milliseconds:03d}"
 
 def build_single_srt(transcript: str, duration: float) -> str:
-    """Builds a single SRT block from 0 to the full duration."""
+    """Builds a single SRT block covering 0 to the full duration."""
     start_time = "00:00:00,000"
     end_time = format_time(duration)
     return f"1\n{start_time} --> {end_time}\n{transcript.strip()}\n\n"
@@ -116,6 +116,7 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         return None, None
 
     output_template = temp_audio_path + ".wav"
+    # Updated yt-dlp options with a custom User-Agent header
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_template,
@@ -129,7 +130,13 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
         'socket_timeout': 45,
         'retries': 2,
         'overwrites': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.188 Safari/537.36'
+        },
+        # Optionally add cookies:
+        # 'cookies': 'path/to/your/cookies.txt'
     }
+
     st.info("Downloading and converting audio to WAV... (requires ffmpeg)")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -153,7 +160,8 @@ def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
             os.remove(actual_filepath)
         return None, None
 
-    st.success(f"Audio download & conversion completed: '{video_title}' ({os.path.getsize(actual_filepath)/1024/1024:.2f} MB).")
+    st.success(f"Audio download & conversion completed: '{video_title}' "
+               f"({os.path.getsize(actual_filepath)/1024/1024:.2f} MB).")
     return actual_filepath, video_title
 
 def get_audio_duration(file_path: str) -> float:
@@ -176,8 +184,8 @@ def get_audio_duration(file_path: str) -> float:
 
 def split_audio_file(input_path: str, segment_duration: float) -> list:
     """
-    Splits the audio file into segments of the specified duration (seconds) using ffmpeg.
-    Returns a sorted list of the segment file paths.
+    Splits the audio file into segments of the given duration in seconds using ffmpeg.
+    Returns a sorted list of segment file paths.
     """
     base, ext = os.path.splitext(input_path)
     output_pattern = base + "_chunk_%03d" + ext
@@ -201,8 +209,7 @@ def split_audio_file(input_path: str, segment_duration: float) -> list:
 
 def transcribe_deepgram_srt(audio_data: bytes, language_code: str, filename_hint: str, file_duration: float) -> str:
     """
-    Transcribes audio using Deepgram and generates one SRT block for the entire duration.
-    Deepgram does not provide timestamps, so we use the full duration for a single block.
+    Transcribes audio using Deepgram and returns one SRT block covering the full duration.
     """
     try:
         payload: FileSource = {"buffer": audio_data}
@@ -235,13 +242,12 @@ def transcribe_deepgram_srt(audio_data: bytes, language_code: str, filename_hint
 
 def transcribe_openai_srt(file_path: str, language_code: str, filename_hint: str) -> str:
     """
-    Transcribes audio using OpenAI Whisper and generates SRT subtitles.
-    If file size exceeds the safe limit, it is split into segments, each transcribed separately.
-    Returns the concatenated SRT entries.
+    Transcribes audio using OpenAI Whisper and returns an SRT transcript.
+    If the file exceeds the safe limit, it is split into segments and each is transcribed separately.
     """
     try:
         file_size = os.stat(file_path).st_size
-        safe_limit = 25 * 1024 * 1024 - 2048  # 25 MB minus 2KB margin
+        safe_limit = 25 * 1024 * 1024 - 2048  # 25MB minus 2KB
         if file_size > safe_limit:
             st.info("Audio file exceeds safe limit. Splitting into segments for OpenAI Whisper...", icon="🔄")
             duration = get_audio_duration(file_path)
@@ -270,7 +276,7 @@ def transcribe_openai_srt(file_path: str, language_code: str, filename_hint: str
                 srt_entry = f"{i}\n{start_time} --> {end_time}\n{seg_transcript}\n\n"
                 srt_entries.append(srt_entry)
                 cumulative_time += seg_duration
-                os.remove(seg)  # Clean up the segment
+                os.remove(seg)
             return "".join(srt_entries)
         else:
             with open(file_path, "rb") as af:
@@ -289,12 +295,12 @@ def transcribe_openai_srt(file_path: str, language_code: str, filename_hint: str
 
 def translate_to_english(text: str) -> str:
     """
-    Translates the given SRT transcript text to English using OpenAI ChatCompletion.
-    The prompt instructs to keep the SRT timestamps intact.
+    Translates the provided SRT transcript to English using OpenAI ChatCompletion,
+    preserving the SRT timestamps.
     """
     try:
         st.info("Translating transcript to English...", icon="🔄")
-        prompt = f"Translate the following subtitles to English while keeping the timestamps unchanged. Only translate the dialogue lines:\n\n{text}"
+        prompt = f"Translate the following subtitles to English while keeping the timestamps intact. Only translate the dialogue lines:\n\n{text}"
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
@@ -329,7 +335,7 @@ st.markdown(
 Enter a YouTube URL below. The app will download the audio track, transcribe it using either Deepgram or OpenAI Whisper,
 and generate the transcript in SRT (SubRip Subtitle) format with timestamps.
 You can also download the SRT transcript as a Word (.docx) file.
-*(Requires `ffmpeg` installed via packages.txt)*
+*(Requires `ffmpeg` installed in the backend via packages.txt)*
     """
 )
 
@@ -384,7 +390,7 @@ if st.button("Transcribe"):
                 except Exception as e:
                     st.warning(f"Could not remove temporary file: {e}", icon="⚠️")
 
-            # If Hindi was selected, translate the SRT transcript to English.
+            # For Hindi videos, translate the SRT transcript to English.
             if selected_language_name.lower() == "hindi" and transcript_srt not in ["", "[Transcription empty or failed]"]:
                 transcript_srt = translate_to_english(transcript_srt)
 
