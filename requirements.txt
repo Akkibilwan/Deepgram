@@ -1,4 +1,17 @@
-streamlit>=1.15.0
-yt-dlp>=2025.06.10
-openai>=0.27.0
-requests>=2.28.0
+# Main application framework
+streamlit
+
+# For downloading media from YouTube and other websites
+yt-dlp
+
+# For downloading files from Google Drive
+gdown
+
+# OpenAI API client
+# IMPORTANT: Version is pinned below 1.0 because our script uses syntax 
+# like `openai.Audio.transcribe`. Newer versions (1.0 and above) use a 
+# different structure and will cause errors with this code.
+openai<1.0
+
+# HTTP library, a dependency for the packages above
+requests
