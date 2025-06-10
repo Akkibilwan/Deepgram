@@ -20,8 +20,8 @@ st.set_page_config(
 
 st.warning(
     """
-**Dependency Alert:** This app relies on `ffmpeg` being installed via `packages.txt`.
-It uses ffmpeg to extract audio from video files. Please monitor logs for any ffmpeg errors.
+**Dependency Alert:** This app relies on `ffmpeg` installed via `packages.txt` to extract audio from YouTube and Google Drive videos.
+It uses ffmpeg to convert video to WAV for Whisper transcription. Please ensure ffmpeg is available and watch logs for any errors.
 """,
     icon="ℹ️"
 )
