@@ -2,11 +2,11 @@
 import streamlit as st
 import os
 import tempfile
-import yt_dlp      # For YouTube downloads
+import yt_dlp      # For downloading YouTube audio
 import re
 import subprocess
 import logging
-import requests     # For Google Drive downloads
+import requests     # For downloading from Google Drive
 from datetime import datetime
 import openai
 
@@ -21,12 +21,12 @@ st.set_page_config(
 )
 
 st.title("🎬 Media Transcriber")
-st.write("Use a YouTube or Google Drive URL to extract audio and get a Whisper transcript.")
+st.write("Enter a YouTube or Google Drive URL to extract audio and get a Whisper transcript.")
 
 st.warning(
     """
-**Dependency Alert:** This app requires `ffmpeg` (via packages.txt) to extract audio from video files.  
-Ensure `ffmpeg` is present and monitor the logs for any errors.
+**Dependency Alert:** Needs `ffmpeg` (via packages.txt) to extract audio from video files.  
+Ensure `ffmpeg` is installed and watch logs for errors.
 """,
     icon="ℹ️"
 )
@@ -34,7 +34,6 @@ Ensure `ffmpeg` is present and monitor the logs for any errors.
 # ————— Helper functions —————
 
 def sanitize_filename(name: str) -> str:
-    """Convert a title into a safe filename."""
     base = os.path.splitext(name or "transcript")[0]
     safe = re.sub(r'[<>:"/\\|?*\s]+', '_', base)
     return safe.strip('_-') or "transcript"
@@ -77,46 +76,46 @@ def download_audio_yt(url: str) -> tuple[str|None, str|None]:
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         wav_path = tmp.name; tmp.close()
-        ydl_opts = {
+        opts = {
             'format': 'bestaudio/best',
             'outtmpl': wav_path,
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}],
             'quiet': True
         }
         st.info("Downloading YouTube audio...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
         return wav_path, info.get('title', 'transcript')
     except Exception as e:
         st.error(f"YouTube download error: {e}")
-        logging.exception("YT download failed")
+        logging.exception("YT dowload failed")
         return None, None
 
 
 def download_drive_video(file_id: str, dest_path: str):
-    """Download Google Drive file by ID, handling confirmation tokens."""
+    """Download from Google Drive handling confirmation tokens."""
     URL = "https://drive.google.com/uc?export=download"
     session = requests.Session()
     params = {'id': file_id}
-    response = session.get(URL, params=params, stream=True)
-    # Look for confirm token (for large files)
-    for key, val in response.cookies.items():
-        if key.startswith('download_warning'):
-            params['confirm'] = val
-            response = session.get(URL, params=params, stream=True)
+    resp = session.get(URL, params=params, stream=True)
+    # handle large file confirmation
+    for k, v in resp.cookies.items():
+        if k.startswith('download_warning'):
+            params['confirm'] = v
+            resp = session.get(URL, params=params, stream=True)
             break
     with open(dest_path, 'wb') as f:
-        for chunk in response.iter_content(32768):
+        for chunk in resp.iter_content(32768):
             if chunk:
                 f.write(chunk)
 
 
 def download_media(url: str) -> tuple[str|None, str|None]:
-    """Detect URL type (YouTube vs Drive) and download accordingly."""
+    """Detect URL type and download accordingly."""
     if "drive.google.com" in url:
         m = re.search(r"/(?:d/|open\?id=)([\w-]+)", url)
         if not m:
-            st.error("Invalid Google Drive URL")
+            st.error("Invalid Google Drive URL.")
             return None, None
         file_id = m.group(1)
         tmp_vid = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
@@ -127,13 +126,11 @@ def download_media(url: str) -> tuple[str|None, str|None]:
             st.error(f"Drive download error: {e}")
             logging.exception("Drive download failed")
             return None, None
-        # Extract audio
         wav_path = tmp_vid.rsplit('.',1)[0] + ".wav"
-        cmd = ["ffmpeg", "-i", tmp_vid, "-vn",
-               "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path]
+        cmd = ["ffmpeg", "-i", tmp_vid, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path]
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if proc.returncode != 0 or not os.path.exists(wav_path):
-            st.error("ffmpeg audio extraction failed.")
+            st.error("Audio extraction via ffmpeg failed.")
             logging.error(proc.stderr.decode())
             return None, None
         return wav_path, os.path.basename(tmp_vid)
@@ -142,35 +139,6 @@ def download_media(url: str) -> tuple[str|None, str|None]:
 
 
 def transcribe_whisper(audio_path: str, lang_code: str) -> str:
-    """Transcribe WAV via OpenAI Whisper."""
+    """Transcribe audio using OpenAI Whisper."""
     st.info("Transcribing with Whisper...")
     try:
-        with open(audio_path, 'rb') as f:
-            resp = openai.Audio.transcribe('whisper-1', file=f, language=lang_code)
-        return resp.get('text','')
-    except Exception as e:
-        st.error(f"Whisper transcription error: {e}")
-        logging.exception("Whisper failed")
-        return ''
-
-# ————— Main UI —————
-url_input = st.text_input("Enter YouTube or Drive URL:")
-lang = st.selectbox("Select language:", list(SUPPORTED_LANGUAGES.keys()), index=0)
-
-if st.button("Generate Transcript"):
-    st.write("🔍 Processing URL:", url_input)
-    if not url_input:
-        st.error("Please provide a URL.")
-    else:
-        audio_file, title = download_media(url_input)
-        st.write("✅ Audio file:", audio_file)
-        if audio_file:
-            transcript = transcribe_whisper(audio_file, SUPPORTED_LANGUAGES[lang])
-            if transcript:
-                st.subheader("Transcript")
-                st.text_area("", transcript, height=300)
-                fname = sanitize_filename(title) + ".txt"
-                st.download_button("Download Transcript", transcript, file_name=fname, mime="text/plain")
-
-st.markdown("---")
-st.caption(f"Powered by Whisper, yt-dlp, requests & ffmpeg — {datetime.now():%Y-%m-%d %H:%M:%S}")
