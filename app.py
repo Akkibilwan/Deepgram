@@ -1,33 +1,27 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import os
-import io
 import tempfile
-import yt_dlp  # For downloading and converting audio
+import yt_dlp  # For downloading and converting audio from YouTube
+import gdown    # For downloading from Google Drive
 import re
 import subprocess
 import json
 from datetime import datetime
-from deepgram import (
-    DeepgramClient,
-    DeepgramClientOptions,
-    PrerecordedOptions,
-    FileSource,
-)
-from docx import Document
 import openai
+from docx import Document
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="YouTube Transcriber (SRT Output)",
+    page_title="YouTube & Drive Media Transcriber (SRT Output)",
     layout="wide",
     initial_sidebar_state="auto"
 )
 
 st.warning(
     """
-**Dependency Alert:** This app relies on `ffmpeg` being installed via `packages.txt`. 
-It uses ffmpeg to convert the downloaded audio to WAV. Please monitor logs for any ffmpeg errors.
+**Dependency Alert:** This app relies on `ffmpeg` being installed via `packages.txt`.
+It uses ffmpeg to extract audio from video files. Please monitor logs for any ffmpeg errors.
 """,
     icon="ℹ️"
 )
@@ -42,6 +36,7 @@ def format_time(seconds: float) -> str:
     milliseconds = int((secs - int(secs)) * 1000)
     return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{milliseconds:03d}"
 
+
 def build_single_srt(transcript: str, duration: float) -> str:
     """Builds a single SRT block covering the entire duration."""
     start_time = "00:00:00,000"
@@ -52,7 +47,7 @@ def build_single_srt(transcript: str, duration: float) -> str:
 def load_api_key(key_name: str) -> str:
     try:
         key = st.secrets[key_name]
-        if not key or key == f"YOUR_{key_name}_HERE" or len(key) < 20:
+        if not key or key.startswith("YOUR_"):
             st.error(f"Error: {key_name} missing/invalid.", icon="🚨")
             return ""
         return key
@@ -60,26 +55,11 @@ def load_api_key(key_name: str) -> str:
         st.error(f"Secrets error: {e}", icon="🚨")
         return ""
 
-# Load API keys and initialize clients
-DEEPGRAM_API_KEY = load_api_key("DEEPGRAM_API_KEY")
-if not DEEPGRAM_API_KEY:
-    st.stop()
+# Load OpenAI API key
 OPENAI_API_KEY = load_api_key("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("OpenAI API key missing. Please add OPENAI_API_KEY to your secrets.", icon="🚨")
     st.stop()
-
-@st.cache_resource
-def get_deepgram_client(api_key):
-    try:
-        config = DeepgramClientOptions(verbose=False)
-        return DeepgramClient(api_key, config)
-    except Exception as e:
-        st.error(f"Deepgram client init error: {e}", icon="🚨")
-        st.stop()
-
-deepgram = get_deepgram_client(DEEPGRAM_API_KEY)
-openai.api_key = OPENAI_API_KEY  # Set OpenAI API key
+openai.api_key = OPENAI_API_KEY
 
 SUPPORTED_LANGUAGES = {
     "English": "en",
@@ -95,87 +75,85 @@ SUPPORTED_LANGUAGES = {
     "Chinese (Mandarin, Simplified)": "zh-CN"
 }
 
+
 def sanitize_filename(filename: str) -> str:
     if not filename:
         return "transcript"
     base = os.path.splitext(filename)[0]
-    san = re.sub(r'[<>:"/\\|?*\s\.\t\n\r\f\v]+', '_', base)
+    san = re.sub(r'[<>:"/\\|?*\s]+', '_', base)
     return san.strip('_-') or "transcript"
+
 
 def download_audio_yt_dlp(url: str) -> tuple[str | None, str | None]:
     """
     Downloads audio from a YouTube URL and converts it to a WAV file.
     Returns a tuple (file_path, video_title).
     """
-    video_title = "audio_transcript"
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix="") as temp_audio:
-            temp_audio_path = temp_audio.name
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        output_wav = temp.name
+        temp.close()
     except Exception as e:
         st.error(f"Failed to create temporary file: {e}", icon="❌")
         return None, None
 
-    output_template = temp_audio_path + ".wav"
-    
-    # Optional: Write cookies to a temporary file if provided in secrets.
-    cookies_path = None
-    if "COOKIES" in st.secrets:
-        try:
-            cookies_content = st.secrets["COOKIES"]
-            with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".txt") as cookie_file:
-                cookie_file.write(cookies_content)
-                cookies_path = cookie_file.name
-        except Exception as e:
-            st.error(f"Error writing cookies to temporary file: {e}", icon="❌")
-    
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': output_template,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-        }],
+        'outtmpl': output_wav,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}],
         'noplaylist': True,
-        'quiet': False,
+        'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 45,
-        'retries': 2,
-        'overwrites': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.188 Safari/537.36'
-        },
+        'socket_timeout': 30,
     }
-    if cookies_path:
-        ydl_opts['cookiefile'] = cookies_path
 
-    st.info("Downloading and converting audio to WAV... (requires ffmpeg)")
+    st.info("Downloading and converting YouTube audio to WAV... (requires ffmpeg)")
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(url, download=True)
-            video_title = info_dict.get('title', video_title)
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'audio_transcript')
     except Exception as e:
         st.error(f"yt-dlp error: {e}", icon="❌")
-        if os.path.exists(output_template):
-            os.remove(output_template)
-        return None, None
-    finally:
-        if cookies_path and os.path.exists(cookies_path):
-            os.remove(cookies_path)
-
-    actual_filepath = output_template
-    if not os.path.exists(actual_filepath):
-        candidate = output_template + ".wav"
-        if os.path.exists(candidate):
-            actual_filepath = candidate
-
-    if not os.path.exists(actual_filepath) or os.path.getsize(actual_filepath) == 0:
-        st.error("Download/Conversion failed: output file missing/empty.", icon="❌")
-        if os.path.exists(actual_filepath):
-            os.remove(actual_filepath)
         return None, None
 
-    st.success(f"Audio download & conversion completed: '{video_title}' ({os.path.getsize(actual_filepath)/1024/1024:.2f} MB).")
-    return actual_filepath, video_title
+    return output_wav, title
+
+
+def download_media(url: str) -> tuple[str | None, str | None]:
+    """
+    Downloads media from YouTube or Google Drive, returning a WAV audio file and title.
+    """
+    if "drive.google.com" in url:
+        # Extract Drive file ID
+        match = re.search(r"/(?:d/|open\?id=)([a-zA-Z0-9_-]+)", url)
+        if not match:
+            st.error("Could not parse Google Drive file ID. Please ensure it's a shareable URL.", icon="❌")
+            return None, None
+        file_id = match.group(1)
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+
+        try:
+            temp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            video_path = temp_video.name
+            temp_video.close()
+            st.info("Downloading video from Google Drive...")
+            gdown.download(download_url, video_path, quiet=False)
+        except Exception as e:
+            st.error(f"Drive download error: {e}", icon="❌")
+            return None, None
+
+        # Extract audio from video
+        audio_path = video_path.rsplit('.', 1)[0] + ".wav"
+        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", audio_path]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0 or not os.path.exists(audio_path):
+            st.error("Error extracting audio from video.", icon="❌")
+            return None, None
+
+        return audio_path, os.path.basename(video_path)
+    else:
+        return download_audio_yt_dlp(url)
+
 
 def get_audio_duration(file_path: str) -> float:
     """
@@ -195,30 +173,72 @@ def get_audio_duration(file_path: str) -> float:
         st.error(f"Error getting duration: {e}", icon="❌")
         return 0.0
 
-# --- The rest of your transcription and SRT generation functions would remain the same as before ---
-# For brevity, only the download function has been updated to include cookies.
 
-st.title("🎬 YouTube Video Transcriber (SRT Output)")
+def transcribe_with_whisper(file_path: str, language: str) -> str:
+    """Transcribes audio using OpenAI Whisper model."""
+    st.info("Transcribing audio with Whisper AI...")
+    try:
+        with open(file_path, "rb") as audio_file:
+            resp = openai.Audio.transcribe(
+                model="whisper-1",
+                file=audio_file,
+                language=language
+            )
+        return resp.get('text', '')
+    except Exception as e:
+        st.error(f"Whisper transcription error: {e}", icon="❌")
+        return ""
+
+# --- MAIN UI ---
+st.title("🎬 Media Transcriber (SRT Output)")
 st.markdown(
     """
-Enter a YouTube URL below. The app will download the audio track, transcribe it using either Deepgram or OpenAI Whisper,
-and generate an SRT (SubRip Subtitle) transcript with timestamps.
+Enter a YouTube or Google Drive URL below. The app will download the media, extract audio via ffmpeg,
+transcribe it using OpenAI Whisper, and generate an SRT transcript with timestamps.
 You can also download the SRT transcript as a Word (.docx) file.
 *(Requires `ffmpeg` installed via packages.txt)*
     """
 )
 
-youtube_url = st.text_input("Enter YouTube URL:", placeholder="e.g., https://www.youtube.com/watch?v=...")
+media_url = st.text_input("Enter YouTube or Drive URL:", placeholder="e.g., https://youtu.be/... or https://drive.google.com/...")
 selected_language_name = st.selectbox(
-    "Audio Language (Language detection enabled)",
+    "Audio Language (for transcription)",
     options=list(SUPPORTED_LANGUAGES.keys()),
-    index=0,
-    help="Select the expected audio language. (If Hindi is selected, the transcript will be translated to English.)"
+    index=0
 )
 selected_language_code = SUPPORTED_LANGUAGES[selected_language_name]
 
-# (Include your transcription, SRT generation, translation, and main UI code below as before.)
+if media_url:
+    audio_path, title = download_media(media_url)
+    if audio_path:
+        duration = get_audio_duration(audio_path)
+        transcript_text = transcribe_with_whisper(audio_path, selected_language_code)
+        if transcript_text:
+            srt_data = build_single_srt(transcript_text, duration)
+            st.subheader("Generated SRT:")
+            st.text_area("SRT Content", value=srt_data, height=200)
+
+            # Download as .srt
+            filename = sanitize_filename(title) + ".srt"
+            st.download_button(
+                label="Download SRT",
+                data=srt_data,
+                file_name=filename,
+                mime="text/plain"
+            )
+
+            # Download as Word
+            doc = Document()
+            doc.add_paragraph(srt_data)
+            doc_stream = io.BytesIO()
+            doc.save(doc_stream)
+            doc_stream.seek(0)
+            st.download_button(
+                label="Download as Word (.docx)",
+                data=doc_stream,
+                file_name=sanitize_filename(title) + ".docx"
+            )
 
 st.markdown("---")
 current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"Powered by Deepgram, OpenAI Whisper, yt-dlp, and Streamlit. | App loaded: {current_time_str}")
+st.caption(f"Powered by OpenAI Whisper, yt-dlp, gdown, and Streamlit. | App loaded: {current_time_str}")
