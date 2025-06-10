@@ -86,8 +86,8 @@ def download_drive_video(file_id: str, dest_path: str):
         logging.exception("gdown download failed")
         raise
 
-def download_media(url: str) -> tuple[str | None, str | None]:
-    """Detects the URL type (YouTube vs. Google Drive) and downloads the media."""
+def download_media_from_url(url: str) -> tuple[str | None, str | None]:
+    """Processes a URL and returns a path to a standardized WAV file."""
     if "drive.google.com" in url:
         m = re.search(r"/(?:d/|open\?id=)([\w-]+)", url)
         if not m:
@@ -103,24 +103,21 @@ def download_media(url: str) -> tuple[str | None, str | None]:
         except Exception:
             return None, None
 
+        # Process the downloaded file with ffmpeg
         wav_path = process_media_file(tmp_vid_path)
         if not wav_path:
              os.remove(tmp_vid_path) # Clean up original download
              return None, None
         return wav_path, os.path.basename(tmp_vid_path)
     else:
+        # Assumes YouTube or other yt-dlp compatible URL
         return download_audio_yt(url)
 
-# --- NEW: Function to process any media file (downloaded or uploaded) with ffmpeg ---
 def process_media_file(input_path: str) -> str | None:
-    """
-    Converts any media file (audio or video) into a 16kHz mono WAV file for Whisper.
-    Returns the path to the converted WAV file.
-    """
-    st.info("Extracting audio with ffmpeg...")
+    """Converts any media file into a 16kHz mono WAV file for Whisper."""
+    st.info("Preparing audio file with ffmpeg...")
     wav_path = os.path.splitext(input_path)[0] + ".wav"
     
-    # This ffmpeg command works for both audio and video inputs.
     cmd = ["ffmpeg", "-i", input_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path, "-y"]
     
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -160,15 +157,25 @@ SUPPORTED_LANGUAGES = {
     "Hindi": "hi", "Japanese": "ja", "Russian": "ru", "Chinese": "zh",
 }
 
-# --- UPDATED: UI to select between URL and File Upload ---
-st.subheader("Step 1: Choose Your Input Method")
+# --- CORRECTED LOGIC: Display input widgets BEFORE the button is clicked ---
+st.subheader("Step 1: Provide Your Media")
 input_method = st.radio(
-    "Select one:",
-    ("Enter a URL", "Upload a File"),
-    label_visibility="collapsed"
+    "Choose input method:",
+    ("Enter a URL", "Upload a File")
 )
 
-# --- Common UI elements for language and button ---
+url = None
+uploaded_file = None
+
+if input_method == "Enter a URL":
+    url = st.text_input("Enter a YouTube or Google Drive URL:", placeholder="https://www.youtube.com/watch?v=...")
+else: # "Upload a File"
+    uploaded_file = st.file_uploader(
+        "Upload an audio or video file",
+        type=['mp3', 'mp4', 'm4a', 'wav', 'mov', 'avi', 'mkv']
+    )
+
+# --- Step 2: Language and Transcription Button ---
 st.subheader("Step 2: Select Language and Transcribe")
 selected_lang_name = st.selectbox(
     "Language of the media:",
@@ -177,35 +184,27 @@ selected_lang_name = st.selectbox(
 )
 lang_code = SUPPORTED_LANGUAGES[selected_lang_name]
 
-# --- Main processing logic ---
 if st.button("Start Transcription", type="primary"):
     audio_path, title = None, None
-    temp_media_path = None # To keep track of temporary uploaded files
+    temp_media_path = None
 
     if input_method == "Enter a URL":
-        url = st.text_input("Enter a YouTube or Google Drive URL:", key="url_input")
         if not url:
             st.warning("Please enter a URL to start.")
             st.stop()
         
-        with st.spinner("Step 1/2: Downloading and preparing audio... This might take a while."):
-            audio_path, title = download_media(url)
+        with st.spinner("Downloading and preparing audio from URL..."):
+            audio_path, title = download_media_from_url(url)
 
-    else: # "Upload a File"
-        uploaded_file = st.file_uploader(
-            "Upload an audio or video file",
-            type=['mp3', 'mp4', 'm4a', 'wav', 'mov', 'avi', 'mkv'],
-            label_visibility="collapsed"
-        )
+    elif input_method == "Upload a File":
         if uploaded_file is None:
             st.warning("Please upload a file to start.")
             st.stop()
         
-        with st.spinner("Step 1/2: Processing uploaded file..."):
-            # Save uploaded file to a temporary path
+        with st.spinner("Processing uploaded file..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
-                temp_media_path = tmp_file.name # Keep track for cleanup
+                temp_media_path = tmp_file.name
             
             title = uploaded_file.name
             audio_path = process_media_file(temp_media_path)
@@ -214,13 +213,13 @@ if st.button("Start Transcription", type="primary"):
     if audio_path and os.path.exists(audio_path):
         st.success("✅ Audio ready for transcription.")
         
-        with st.spinner("Step 2/2: Transcribing audio with Whisper..."):
+        with st.spinner("Transcribing audio with Whisper... This can take a few moments."):
             transcript_text = transcribe_whisper(audio_path, lang_code)
             
-        if transcript_text:
+        if transcript_text is not None:
             st.success("✅ Transcription complete!")
             
-            st.subheader(f"Transcript from: {sanitize_filename(title)}")
+            st.subheader(f"Transcript for: {sanitize_filename(title)}")
             st.text_area("Full Transcript", transcript_text, height=300)
 
             st.download_button(
@@ -236,4 +235,4 @@ if st.button("Start Transcription", type="primary"):
             os.remove(temp_media_path)
             
     else:
-        st.error("Could not prepare the audio for transcription. Please check the input and try again.")
+        st.error("Could not prepare the audio. Please check your input (URL or file) and try again.")
