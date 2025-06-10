@@ -8,9 +8,9 @@ import subprocess
 import logging
 import requests      # For downloading from Google Drive
 import openai
+import gdown         # For downloading from Google Drive
 
 # ————— Logging —————
-# Configures basic logging to show informational messages.
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ————— Page configuration —————
@@ -21,12 +21,12 @@ st.set_page_config(
 )
 
 st.title("🎬 Media Transcriber")
-st.write("Enter a YouTube or Google Drive URL to extract its audio and generate a transcript using OpenAI Whisper.")
+st.write("Transcribe from a YouTube/Google Drive URL or by uploading your own audio/video file.")
 
 st.warning(
     """
 **Dependency Alert:** This app requires `ffmpeg` to be installed on the system where it's running. 
-It is used to extract audio from video files. Please ensure `ffmpeg` is available.
+It is used to extract audio from all media types. Please ensure `ffmpeg` is available.
 """,
     icon="ℹ️"
 )
@@ -57,7 +57,7 @@ def download_audio_yt(url: str) -> tuple[str | None, str | None]:
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
         wav_path = tmp.name
-        tmp.close() # Close the file so yt-dlp can write to it
+        tmp.close()
 
         opts = {
             'format': 'bestaudio/best',
@@ -76,26 +76,15 @@ def download_audio_yt(url: str) -> tuple[str | None, str | None]:
         logging.exception("YT download failed")
         return None, None
 
-
 def download_drive_video(file_id: str, dest_path: str):
-    """Downloads a file from Google Drive, handling large file confirmations."""
-    URL = "https://drive.google.com/uc?export=download"
-    session = requests.Session()
-    params = {'id': file_id}
-    resp = session.get(URL, params=params, stream=True)
-
-    # Handle large file confirmation
-    for key, value in resp.cookies.items():
-        if key.startswith('download_warning'):
-            params['confirm'] = value
-            resp = session.get(URL, params=params, stream=True)
-            break
-            
-    with open(dest_path, 'wb') as f:
-        for chunk in resp.iter_content(32768):
-            if chunk:
-                f.write(chunk)
-
+    """Downloads a file from Google Drive using the gdown library."""
+    try:
+        url = f'https://drive.google.com/uc?id={file_id}'
+        gdown.download(url, dest_path, quiet=False)
+    except Exception as e:
+        st.error(f"Google Drive download failed. This can happen with private files. Error: {e}")
+        logging.exception("gdown download failed")
+        raise
 
 def download_media(url: str) -> tuple[str | None, str | None]:
     """Detects the URL type (YouTube vs. Google Drive) and downloads the media."""
@@ -111,39 +100,45 @@ def download_media(url: str) -> tuple[str | None, str | None]:
         
         try:
             download_drive_video(file_id, tmp_vid_path)
-        except Exception as e:
-            st.error(f"Google Drive download error: {e}")
-            logging.exception("Drive download failed")
+        except Exception:
             return None, None
 
-        # Extract audio using ffmpeg
-        wav_path = tmp_vid_path.rsplit('.', 1)[0] + ".wav"
-        cmd = ["ffmpeg", "-i", tmp_vid_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path, "-y"]
-        
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if proc.returncode != 0 or not os.path.exists(wav_path):
-            st.error("Audio extraction via ffmpeg failed.")
-            logging.error(proc.stderr.decode())
-            return None, None
-            
+        wav_path = process_media_file(tmp_vid_path)
+        if not wav_path:
+             os.remove(tmp_vid_path) # Clean up original download
+             return None, None
         return wav_path, os.path.basename(tmp_vid_path)
     else:
-        # Assumes YouTube or other yt-dlp compatible URL
         return download_audio_yt(url)
 
+# --- NEW: Function to process any media file (downloaded or uploaded) with ffmpeg ---
+def process_media_file(input_path: str) -> str | None:
+    """
+    Converts any media file (audio or video) into a 16kHz mono WAV file for Whisper.
+    Returns the path to the converted WAV file.
+    """
+    st.info("Extracting audio with ffmpeg...")
+    wav_path = os.path.splitext(input_path)[0] + ".wav"
+    
+    # This ffmpeg command works for both audio and video inputs.
+    cmd = ["ffmpeg", "-i", input_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", wav_path, "-y"]
+    
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        st.error(f"Audio extraction via ffmpeg failed.")
+        logging.error(proc.stderr.decode())
+        return None
+        
+    return wav_path
 
 def transcribe_whisper(audio_path: str, lang_code: str | None) -> str | None:
     """Transcribes audio using the OpenAI Whisper API."""
     try:
         with open(audio_path, "rb") as audio_file:
-            # Note: Using the older syntax compatible with openai < 1.0
-            # If using openai > 1.0, the syntax would be:
-            # client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            # transcript = client.audio.transcriptions.create(...)
             transcript = openai.Audio.transcribe(
                 model="whisper-1",
                 file=audio_file,
-                language=lang_code if lang_code != "auto" else None # Whisper API expects None for auto-detection
+                language=lang_code if lang_code != "auto" else None
             )
         return transcript['text']
     except Exception as e:
@@ -153,69 +148,92 @@ def transcribe_whisper(audio_path: str, lang_code: str | None) -> str | None:
 
 # ————— Main App Logic —————
 
-# Load OpenAI API key and stop if it's not available
+# Load OpenAI API key
 OPENAI_API_KEY = load_api_key("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.stop()
 openai.api_key = OPENAI_API_KEY
 
-# Supported languages for Whisper, including an auto-detect option
 SUPPORTED_LANGUAGES = {
-    "Auto-Detect": "auto",
-    "English": "en",
-    "Spanish": "es",
-    "French": "fr",
-    "German": "de",
-    "Italian": "it",
-    "Portuguese": "pt",
-    "Dutch": "nl",
-    "Hindi": "hi",
-    "Japanese": "ja",
-    "Russian": "ru",
-    "Chinese": "zh",
+    "Auto-Detect": "auto", "English": "en", "Spanish": "es", "French": "fr",
+    "German": "de", "Italian": "it", "Portuguese": "pt", "Dutch": "nl",
+    "Hindi": "hi", "Japanese": "ja", "Russian": "ru", "Chinese": "zh",
 }
 
-# --- UI elements for user input ---
-url = st.text_input("Enter a YouTube or Google Drive URL:", key="url_input")
+# --- UPDATED: UI to select between URL and File Upload ---
+st.subheader("Step 1: Choose Your Input Method")
+input_method = st.radio(
+    "Select one:",
+    ("Enter a URL", "Upload a File"),
+    label_visibility="collapsed"
+)
+
+# --- Common UI elements for language and button ---
+st.subheader("Step 2: Select Language and Transcribe")
 selected_lang_name = st.selectbox(
-    "Choose the language of the media:",
+    "Language of the media:",
     options=list(SUPPORTED_LANGUAGES.keys()),
-    index=0  # Default to "Auto-Detect"
+    index=0
 )
 lang_code = SUPPORTED_LANGUAGES[selected_lang_name]
 
-
-# --- Button to trigger the analysis ---
+# --- Main processing logic ---
 if st.button("Start Transcription", type="primary"):
-    if not url:
-        st.warning("Please enter a URL to start.")
-    else:
-        audio_path, title = None, None
+    audio_path, title = None, None
+    temp_media_path = None # To keep track of temporary uploaded files
+
+    if input_method == "Enter a URL":
+        url = st.text_input("Enter a YouTube or Google Drive URL:", key="url_input")
+        if not url:
+            st.warning("Please enter a URL to start.")
+            st.stop()
+        
         with st.spinner("Step 1/2: Downloading and preparing audio... This might take a while."):
             audio_path, title = download_media(url)
-            
-        if audio_path and os.path.exists(audio_path):
-            st.success("✅ Audio downloaded successfully.")
-            
-            transcript_text = None
-            with st.spinner("Step 2/2: Transcribing audio with Whisper..."):
-                transcript_text = transcribe_whisper(audio_path, lang_code)
-                
-            if transcript_text:
-                st.success("✅ Transcription complete!")
-                
-                # Display the final transcript
-                st.subheader(f"Transcript from: {sanitize_filename(title)}")
-                st.text_area("Full Transcript", transcript_text, height=300)
 
-                # Provide a download button for the transcript
-                st.download_button(
-                    label="Download Transcript (.txt)",
-                    data=transcript_text,
-                    file_name=f"{sanitize_filename(title)}.txt",
-                    mime="text/plain"
-                )
-            # Clean up the temporary audio file
-            os.remove(audio_path)
-        else:
-            st.error("Could not retrieve the audio file. Please check the URL and try again.")
+    else: # "Upload a File"
+        uploaded_file = st.file_uploader(
+            "Upload an audio or video file",
+            type=['mp3', 'mp4', 'm4a', 'wav', 'mov', 'avi', 'mkv'],
+            label_visibility="collapsed"
+        )
+        if uploaded_file is None:
+            st.warning("Please upload a file to start.")
+            st.stop()
+        
+        with st.spinner("Step 1/2: Processing uploaded file..."):
+            # Save uploaded file to a temporary path
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                temp_media_path = tmp_file.name # Keep track for cleanup
+            
+            title = uploaded_file.name
+            audio_path = process_media_file(temp_media_path)
+    
+    # --- Common Transcription Logic ---
+    if audio_path and os.path.exists(audio_path):
+        st.success("✅ Audio ready for transcription.")
+        
+        with st.spinner("Step 2/2: Transcribing audio with Whisper..."):
+            transcript_text = transcribe_whisper(audio_path, lang_code)
+            
+        if transcript_text:
+            st.success("✅ Transcription complete!")
+            
+            st.subheader(f"Transcript from: {sanitize_filename(title)}")
+            st.text_area("Full Transcript", transcript_text, height=300)
+
+            st.download_button(
+                label="Download Transcript (.txt)",
+                data=transcript_text,
+                file_name=f"{sanitize_filename(title)}.txt",
+                mime="text/plain"
+            )
+        
+        # Clean up all temporary files
+        os.remove(audio_path)
+        if temp_media_path and os.path.exists(temp_media_path):
+            os.remove(temp_media_path)
+            
+    else:
+        st.error("Could not prepare the audio for transcription. Please check the input and try again.")
